@@ -1,0 +1,13 @@
+# PostgreSQL data directories (container-owned, not source)
+pg1-data/
+pg2-data/
+
+# pgBackRest backup repository (binary backups, not source)
+pgbackrest-repo/
+
+# Unix socket directories (runtime only)
+pg1-socket/
+pg2-socket/
+
+# pgAdmin persistent data
+pgadmin-data/
