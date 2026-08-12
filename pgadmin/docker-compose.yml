@@ -1,0 +1,23 @@
+# ── Dedicated pgAdmin ──────────────────────────────────────
+# Connects to prod + backup PG through the host's forwarded ports.
+# prod   PG  → host port 5434
+# backup PG  → host port 5433
+# pgadmin    → host port 5435
+
+services:
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin
+    ports:
+      - "5435:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@test.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-changeme}
+    extra_hosts:
+      # Lets the container reach the host's published ports (5434, 5433)
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Pre-configured servers (copy servers.json.example → servers.json first)
+      - ./servers.json:/pgadmin4/servers.json
+      - ./pgadmin-data:/var/lib/pgadmin
+    restart: unless-stopped

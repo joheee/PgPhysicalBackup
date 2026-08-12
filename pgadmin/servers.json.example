@@ -1,0 +1,24 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "prod-pg",
+      "Group": "Servers",
+      "Host": "host.docker.internal",
+      "Port": 5434,
+      "MaintenanceDB": "postgres",
+      "Username": "postgres",
+      "Password": "changeme",
+      "SSLMode": "prefer"
+    },
+    "2": {
+      "Name": "backup-pg",
+      "Group": "Servers",
+      "Host": "host.docker.internal",
+      "Port": 5433,
+      "MaintenanceDB": "postgres",
+      "Username": "postgres",
+      "Password": "changeme",
+      "SSLMode": "prefer"
+    }
+  }
+}

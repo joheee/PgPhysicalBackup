@@ -10,7 +10,7 @@ services:
     container_name: pg
     hostname: pg
     ports:
-      - "5432:5432"
+      - "5433:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
@@ -40,7 +40,7 @@ services:
     build:
       context: ./backup
       dockerfile: Dockerfile
-    container_name: pgbackup
+    container_name: cron-backup
     environment:
       MY_STANZA: ${MY_STANZA:-pg-prod}
       PGBACKREST_CIPHER_PASS: ${PGBACKREST_CIPHER_PASS:-changeme}
@@ -56,7 +56,7 @@ services:
     build:
       context: ./restore
       dockerfile: Dockerfile
-    container_name: pgrstore
+    container_name: cron-restore
     environment:
       MY_STANZA: ${MY_STANZA:-pg-prod}
       REMOTE_STANZA: ${REMOTE_STANZA:-pg-backup}

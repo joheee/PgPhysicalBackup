@@ -1,0 +1,8 @@
+# Secrets
+.env
+
+# Pre-configured servers (contains DB password)
+servers.json
+
+# pgAdmin persistent data
+pgadmin-data/

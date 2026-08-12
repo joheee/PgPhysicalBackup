@@ -15,12 +15,5 @@ pg-socket/
 # ─── pgBackRest spool (runtime) ─────────────
 pgbackrest-spool/
 
-# ─── Old POC leftovers (remove with sudo) ───
-pg1-data/
-pg2-data/
-pg3-data/
+# ─── pgAdmin data (container-owned) ───────
 pgadmin-data/
-pgbackrest-repo/
-pg1-socket/
-pg2-socket/
-pg3-socket/
