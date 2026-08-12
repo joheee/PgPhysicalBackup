@@ -1,6 +1,5 @@
 FROM postgres:17
 
-# Add pgBackRest for archive_command support
 RUN apt-get update && \
     apt-get install -y curl ca-certificates gnupg && \
     curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | \
@@ -11,7 +10,6 @@ RUN apt-get update && \
     apt-get install -y pgbackrest && \
     rm -rf /var/lib/apt/lists/*
 
-# pgBackRest spool
 RUN mkdir -p -m 750 /var/spool/pgbackrest && \
     chown postgres:postgres /var/spool/pgbackrest && \
     mkdir -p -m 750 /var/log/pgbackrest && \

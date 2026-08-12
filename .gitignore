@@ -1,13 +1,26 @@
-# PostgreSQL data directories (container-owned, not source)
+# ─── Secrets ────────────────────────────────
+.env
+
+# ─── Generated configs (from .conf.tmpl) ───
+configs/pg-pgbackrest.conf
+configs/backup-pgbackrest.conf
+configs/restore-pgbackrest.conf
+
+# ─── PostgreSQL data (container-owned) ──────
+pg-data/
+
+# ─── Unix sockets (runtime) ─────────────────
+pg-socket/
+
+# ─── pgBackRest spool (runtime) ─────────────
+pgbackrest-spool/
+
+# ─── Old POC leftovers (remove with sudo) ───
 pg1-data/
 pg2-data/
-
-# pgBackRest backup repository (binary backups, not source)
+pg3-data/
+pgadmin-data/
 pgbackrest-repo/
-
-# Unix socket directories (runtime only)
 pg1-socket/
 pg2-socket/
-
-# pgAdmin persistent data
-pgadmin-data/
+pg3-socket/
