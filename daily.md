@@ -157,9 +157,9 @@ Disambiguated the standby/DR VM from the functional "backup" service:
 ## 7. Configurable cron schedules (.env)
 
 The backup/restore cron timing moved from hardcoded `entrypoint.sh` strings into `.env` (and `.env.example`):
-- `BACKUP_FULL_CRON` (default `"07 2 * * 0"`), `BACKUP_DIFF_CRON` (`"07 2 * * 1-6"`), `BACKUP_CHECK_CRON` (`"17 7 * * *"`)
-- `RESTORE_SYNC_CRON` (default `"*/30 * * * *"`)
-- Flow: `.env` → compose `environment:` → `entrypoint.sh` heredoc. Built-in defaults remain in the scripts as fallback.
+- `BACKUP_FULL_CRON` (`"07 2 * * 0"`), `BACKUP_DIFF_CRON` (`"07 2 * * 1-6"`), `BACKUP_CHECK_CRON` (`"17 7 * * *"`)
+- `RESTORE_SYNC_CRON` (`"*/30 * * * *"`)
+- Flow: `.env` → compose `environment:` → `entrypoint.sh` heredoc. Scripts **require** these vars (`: "${VAR:?msg}"`) and fail fast if missing — no embedded fallback defaults.
 - Changing a schedule = edit `.env` + recreate the cron container; no image rebuild needed.
 - Values contain spaces → keep them quoted in `.env` (`start.sh` sources it with `source`).
 

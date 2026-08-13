@@ -21,7 +21,7 @@ services:
       -c archive_mode=on
       -c archive_command='pgbackrest --stanza=${MY_STANZA:-pg-prod} archive-push %p'
       -c wal_level=replica
-      -c archive_timeout=60
+      -c archive_timeout=${ARCHIVE_TIMEOUT:-60}
       -c restore_command='pgbackrest --stanza=${REMOTE_STANZA:-pg-reserve} archive-get %f "%p"'
     volumes:
       - ./pg-data:/var/lib/postgresql/data
