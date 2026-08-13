@@ -45,6 +45,9 @@ services:
       MY_STANZA: ${MY_STANZA:-pg-reserve}
       PGBACKREST_CIPHER_PASS: ${PGBACKREST_CIPHER_PASS:-changeme}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      BACKUP_FULL_CRON: ${BACKUP_FULL_CRON:-}
+      BACKUP_DIFF_CRON: ${BACKUP_DIFF_CRON:-}
+      BACKUP_CHECK_CRON: ${BACKUP_CHECK_CRON:-}
     volumes:
       - ./pg-data:/var/lib/postgresql/data:ro
       - ./pg-socket:/var/run/postgresql
@@ -64,6 +67,7 @@ services:
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
       PG_CONTAINER: pg
       DATA_DIR: /var/lib/postgresql/data
+      RESTORE_SYNC_CRON: ${RESTORE_SYNC_CRON:-}
     volumes:
       - ./pg-data:/var/lib/postgresql/data
       - ./pg-socket:/var/run/postgresql

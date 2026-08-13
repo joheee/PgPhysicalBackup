@@ -154,12 +154,22 @@ Disambiguated the standby/DR VM from the functional "backup" service:
   - reserve `restore_command` default → `pg-prod` (was `pg-backup`)
   - prod `sync.sh`/`promote.sh` fallback stanza → `pg-reserve` (was `pg-prod`)
 
+## 7. Configurable cron schedules (.env)
+
+The backup/restore cron timing moved from hardcoded `entrypoint.sh` strings into `.env` (and `.env.example`):
+- `BACKUP_FULL_CRON` (default `"07 2 * * 0"`), `BACKUP_DIFF_CRON` (`"07 2 * * 1-6"`), `BACKUP_CHECK_CRON` (`"17 7 * * *"`)
+- `RESTORE_SYNC_CRON` (default `"*/30 * * * *"`)
+- Flow: `.env` → compose `environment:` → `entrypoint.sh` heredoc. Built-in defaults remain in the scripts as fallback.
+- Changing a schedule = edit `.env` + recreate the cron container; no image rebuild needed.
+- Values contain spaces → keep them quoted in `.env` (`start.sh` sources it with `source`).
+
 ---
 
 ## Files changed today
 
 - `backup/` → `reserve/` directory + VM rename (stanza `pg-backup` → `pg-reserve`)
 - cron container names → `[reserve/prod]-cron-[backup/restore]`
+- cron schedules → `.env`-configurable (`BACKUP_FULL_CRON`, `BACKUP_DIFF_CRON`, `BACKUP_CHECK_CRON`, `RESTORE_SYNC_CRON`)
 - `reserve/backup/Dockerfile` — `-o` on groupmod/usermod
 - `reserve/restore/Dockerfile` — `-o` on groupmod/usermod
 - `prod/backup/Dockerfile` — `-o` on groupmod/usermod

@@ -2,9 +2,11 @@
 # restore container entrypoint — generates crontab from env vars, then starts cron
 set -e
 
-cat > /etc/cron.d/pgbackrest <<'CRON'
-# Sync from remote stanza every 30 minutes
-*/30 * * * *  postgres  /usr/local/bin/sync.sh >> /var/log/pgbackrest/sync.log 2>&1
+SYNC_CRON="${RESTORE_SYNC_CRON:-*/30 * * * *}"
+
+cat > /etc/cron.d/pgbackrest <<CRON
+# Sync from remote stanza (default: every 30 minutes)
+${SYNC_CRON}  postgres  /usr/local/bin/sync.sh >> /var/log/pgbackrest/sync.log 2>&1
 CRON
 
 chmod 644 /etc/cron.d/pgbackrest
