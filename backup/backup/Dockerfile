@@ -11,8 +11,8 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Match postgres UID 999 so it can read PG data and socket
-RUN groupmod -g 999 postgres && \
-    usermod -u 999 postgres && \
+RUN groupmod -o -g 999 postgres && \
+    usermod -o -u 999 postgres && \
     mkdir -p -m 750 /var/log/pgbackrest && \
     chown postgres:postgres /var/log/pgbackrest && \
     mkdir -p -m 750 /var/spool/pgbackrest && \
