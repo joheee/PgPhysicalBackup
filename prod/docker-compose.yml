@@ -7,8 +7,8 @@ services:
     build:
       context: ./pg
       dockerfile: Dockerfile
-    container_name: pg
-    hostname: pg
+    container_name: pg-prod
+    hostname: pg-prod
     ports:
       - "5434:5432"
     environment:
