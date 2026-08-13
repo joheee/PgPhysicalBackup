@@ -40,7 +40,7 @@ services:
     build:
       context: ./backup
       dockerfile: Dockerfile
-    container_name: cron-backup
+    container_name: cron-backup-prod
     environment:
       MY_STANZA: ${MY_STANZA:-pg-prod}
       PGBACKREST_CIPHER_PASS: ${PGBACKREST_CIPHER_PASS:-changeme}
@@ -56,7 +56,7 @@ services:
     build:
       context: ./restore
       dockerfile: Dockerfile
-    container_name: cron-restore
+    container_name: cron-restore-prod
     environment:
       MY_STANZA: ${MY_STANZA:-pg-prod}
       REMOTE_STANZA: ${REMOTE_STANZA:-pg-backup}
