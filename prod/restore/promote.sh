@@ -3,7 +3,7 @@
 # Run manually by operator. NOT called by cron.
 set -euo pipefail
 
-STANZA="${REMOTE_STANZA:-pg-prod}"
+STANZA="${REMOTE_STANZA:-pg-reserve}"
 PG_CONTAINER="${PG_CONTAINER:-pg}"
 DATA_DIR="${DATA_DIR:-/var/lib/postgresql/data}"
 

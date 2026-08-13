@@ -22,7 +22,7 @@ services:
       -c archive_command='pgbackrest --stanza=${MY_STANZA:-pg-prod} archive-push %p'
       -c wal_level=replica
       -c archive_timeout=60
-      -c restore_command='pgbackrest --stanza=${REMOTE_STANZA:-pg-backup} archive-get %f "%p"'
+      -c restore_command='pgbackrest --stanza=${REMOTE_STANZA:-pg-reserve} archive-get %f "%p"'
     volumes:
       - ./pg-data:/var/lib/postgresql/data
       - ./pg-socket:/var/run/postgresql
@@ -40,7 +40,7 @@ services:
     build:
       context: ./backup
       dockerfile: Dockerfile
-    container_name: cron-backup-prod
+    container_name: prod-cron-backup
     environment:
       MY_STANZA: ${MY_STANZA:-pg-prod}
       PGBACKREST_CIPHER_PASS: ${PGBACKREST_CIPHER_PASS:-changeme}
@@ -56,13 +56,13 @@ services:
     build:
       context: ./restore
       dockerfile: Dockerfile
-    container_name: cron-restore-prod
+    container_name: prod-cron-restore
     environment:
       MY_STANZA: ${MY_STANZA:-pg-prod}
-      REMOTE_STANZA: ${REMOTE_STANZA:-pg-backup}
+      REMOTE_STANZA: ${REMOTE_STANZA:-pg-reserve}
       PGBACKREST_CIPHER_PASS: ${PGBACKREST_CIPHER_PASS:-changeme}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
-      PG_CONTAINER: pg
+      PG_CONTAINER: pg-prod
       DATA_DIR: /var/lib/postgresql/data
     volumes:
       - ./pg-data:/var/lib/postgresql/data

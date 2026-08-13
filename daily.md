@@ -11,12 +11,12 @@ PostgreSQL physical backup / DR setup using **pgBackRest** with **S3** as the re
 | Dir | Role | Stanza | PG host port |
 |---|---|---|---|
 | `prod/` | **active** primary VM (`ROLE=active`) | `pg-prod` | 5434 |
-| `backup/` | **standby** DR VM (`ROLE=standby`) | `pg-backup` | 5433 |
+| `reserve/` | **standby** DR VM (`ROLE=standby`) | `pg-reserve` | 5433 |
 | `pgadmin/` | optional pgAdmin UI | — | 5435 |
 
 The two VMs cross-archive to *different stanzas* in the **same S3 bucket**, so they act as mutual standbys:
 - `prod` archives WAL → stanza `pg-prod`
-- `backup` archives WAL → stanza `pg-backup`
+- `reserve` archives WAL → stanza `pg-reserve`
 - each VM's `restore` container pulls the *other* VM's stanza (`REMOTE_STANZA`)
 
 ### Per-VM services (`docker-compose.yml`)
@@ -43,8 +43,8 @@ The two VMs cross-archive to *different stanzas* in the **same S3 bucket**, so t
 
 **Simplest tests (no image changes):**
 ```bash
-docker exec -u postgres pg pgbackrest --stanza=pg-backup info          # read proof
-docker exec -u postgres pg pgbackrest --stanza=pg-backup stanza-create # write proof
+docker exec -u postgres pg pgbackrest --stanza=pg-reserve info          # read proof
+docker exec -u postgres pg pgbackrest --stanza=pg-reserve stanza-create # write proof
 docker exec -u postgres pg pgbackrest repo-ls /pgbackrest              # raw listing (≥2.47)
 ```
 For literal `aws s3 ls`, a throwaway container using the same IAM role via IMDS:
@@ -79,8 +79,8 @@ docker compose restart pgadmin
 **Cause:** `docker.io` (restore image) and `cron` (backup image) create their own system groups (`docker` / `crontab`) during install, and Debian hands out GID **999** to the first system group — so GID 999 was already taken when the Dockerfile tried to renumber `postgres` to 999.
 
 **Fix:** add `-o` (non-unique) to both `groupmod` and `usermod`. Applied to 4 files:
-- `backup/backup/Dockerfile`
-- `backup/restore/Dockerfile`
+- `reserve/backup/Dockerfile`
+- `reserve/restore/Dockerfile`
 - `prod/backup/Dockerfile`
 - `prod/restore/Dockerfile`
 
@@ -99,7 +99,7 @@ RUN groupmod -o -g 999 postgres && \
 **Symptom (pg log):**
 ```
 ERROR: [103]: unable to find a valid repository:
-  repo1: [FileMissingError] unable to load info file '/pgbackrest/archive/pg-backup/archive.info'
+  repo1: [FileMissingError] unable to load info file '/pgbackrest/archive/pg-reserve/archive.info'
   HINT: has a stanza-create been performed?
 ```
 
@@ -107,9 +107,9 @@ ERROR: [103]: unable to find a valid repository:
 
 **Immediate fix (manual, once per stanza):**
 ```bash
-# backup VM
-docker exec -u postgres pg pgbackrest --stanza=pg-backup stanza-create
-docker exec -u postgres pg pgbackrest --stanza=pg-backup info      # verify
+# reserve VM
+docker exec -u postgres pg pgbackrest --stanza=pg-reserve stanza-create
+docker exec -u postgres pg pgbackrest --stanza=pg-reserve info      # verify
 
 # prod VM
 docker exec -u postgres pg pgbackrest --stanza=pg-prod stanza-create
@@ -120,7 +120,7 @@ docker exec -u postgres pg pgbackrest --stanza=pg-prod info
 docker exec -u postgres pg psql -c "SELECT pg_switch_wal();"
 ```
 
-**Status:** the backup VM's `stanza-create` was *suggested* but **not yet confirmed run**. The prod VM still needs `pg-prod` stanza-create too.
+**Status:** the reserve VM's `stanza-create` was *suggested* but **not yet confirmed run**. The prod VM still needs `pg-prod` stanza-create too.
 
 **Proposed automation (not yet applied):** add idempotent stanza-create to both `start.sh` files:
 ```bash
@@ -132,17 +132,35 @@ docker compose exec -T -u postgres pg pgbackrest --stanza="$MY_STANZA" info >/de
 
 ## Open / next steps
 
-- [ ] Run `stanza-create` on the **backup VM** (`pg-backup`) — confirm `info` returns successfully.
+- [ ] Run `stanza-create` on the **reserve VM** (`pg-reserve`) — confirm `info` returns successfully.
 - [ ] Run `stanza-create` on the **prod VM** (`pg-prod`).
-- [ ] Decide whether to bake idempotent `stanza-create` into `prod/start.sh` + `backup/start.sh`.
+- [ ] Decide whether to bake idempotent `stanza-create` into `prod/start.sh` + `reserve/start.sh`.
 - [ ] (only if it bites) docker.sock group-GID matching for the `restore` container's `docker stop/start pg`.
-- [ ] Note: `prod/` and `backup/` are full duplicates — DRY/maintenance concern if logic ever diverges.
+- [ ] Note: `prod/` and `reserve/` are full duplicates — DRY/maintenance concern if logic ever diverges.
+
+---
+
+## 6. Rename: "backup" → "reserve" (this session)
+
+Disambiguated the standby/DR VM from the functional "backup" service:
+- Directory: `backup/` → `reserve/`
+- Stanza: `pg-backup` → `pg-reserve` (S3 archive path changes accordingly — stanzas were not yet created, so nothing to migrate)
+- Cron container names now follow `[reserve/prod]-cron-[backup/restore]`:
+  - reserve: `reserve-cron-backup`, `reserve-cron-restore`
+  - prod: `prod-cron-backup`, `prod-cron-restore`
+- Fixed VM-specific defaults that had been copy-pasted identical between prod/reserve:
+  - prod `PG_CONTAINER` → `pg-prod` (was `pg`, which didn't match the `pg-prod` container)
+  - reserve `archive_command` default → `pg-reserve` (was `pg-prod`)
+  - reserve `restore_command` default → `pg-prod` (was `pg-backup`)
+  - prod `sync.sh`/`promote.sh` fallback stanza → `pg-reserve` (was `pg-prod`)
 
 ---
 
 ## Files changed today
 
-- `backup/backup/Dockerfile` — `-o` on groupmod/usermod
-- `backup/restore/Dockerfile` — `-o` on groupmod/usermod
+- `backup/` → `reserve/` directory + VM rename (stanza `pg-backup` → `pg-reserve`)
+- cron container names → `[reserve/prod]-cron-[backup/restore]`
+- `reserve/backup/Dockerfile` — `-o` on groupmod/usermod
+- `reserve/restore/Dockerfile` — `-o` on groupmod/usermod
 - `prod/backup/Dockerfile` — `-o` on groupmod/usermod
 - `prod/restore/Dockerfile` — `-o` on groupmod/usermod

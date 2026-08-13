@@ -1,7 +1,7 @@
 # ── Dedicated pgAdmin ──────────────────────────────────────
-# Connects to prod + backup PG through the host's forwarded ports.
+# Connects to prod + reserve PG through the host's forwarded ports.
 # prod   PG  → host port 5434
-# backup PG  → host port 5433
+# reserve PG  → host port 5433
 # pgadmin    → host port 5435
 
 services:

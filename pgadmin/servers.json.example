@@ -11,7 +11,7 @@
       "SSLMode": "prefer"
     },
     "2": {
-      "Name": "backup-pg",
+      "Name": "reserve-pg",
       "Group": "Servers",
       "Host": "host.docker.internal",
       "Port": 5433,
