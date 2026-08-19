@@ -1,20 +1,10 @@
 {
   "Servers": {
     "1": {
-      "Name": "prod-pg",
+      "Name": "pg",
       "Group": "Servers",
       "Host": "host.docker.internal",
-      "Port": 5434,
-      "MaintenanceDB": "postgres",
-      "Username": "postgres",
-      "Password": "changeme",
-      "SSLMode": "prefer"
-    },
-    "2": {
-      "Name": "reserve-pg",
-      "Group": "Servers",
-      "Host": "host.docker.internal",
-      "Port": 5433,
+      "Port": 5432,
       "MaintenanceDB": "postgres",
       "Username": "postgres",
       "Password": "changeme",

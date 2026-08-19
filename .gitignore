@@ -4,7 +4,6 @@
 # ─── Generated configs (from .conf.tmpl) ───
 configs/pg-pgbackrest.conf
 configs/backup-pgbackrest.conf
-configs/restore-pgbackrest.conf
 
 # ─── PostgreSQL data (container-owned) ──────
 pg-data/
