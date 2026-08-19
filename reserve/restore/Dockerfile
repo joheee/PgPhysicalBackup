@@ -1,7 +1,7 @@
 FROM debian:bookworm-slim
 
 RUN apt-get update && \
-    apt-get install -y curl ca-certificates gnupg cron docker.io && \
+    apt-get install -y curl ca-certificates gnupg docker.io && \
     curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | \
       gpg --dearmor -o /usr/share/keyrings/pgdg.gpg && \
     echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
@@ -18,10 +18,10 @@ RUN groupmod -o -g 999 postgres && \
     mkdir -p -m 750 /var/spool/pgbackrest && \
     chown postgres:postgres /var/spool/pgbackrest
 
-COPY sync.sh /usr/local/bin/sync.sh
+COPY init-standby.sh /usr/local/bin/init-standby.sh
 COPY promote.sh /usr/local/bin/promote.sh
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/sync.sh /usr/local/bin/promote.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/init-standby.sh /usr/local/bin/promote.sh /usr/local/bin/entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["cron", "-f"]
+CMD ["sleep", "infinity"]

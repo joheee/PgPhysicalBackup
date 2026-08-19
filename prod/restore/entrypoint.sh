@@ -1,5 +1,6 @@
 #!/bin/bash
-# restore container entrypoint — generates crontab from env vars, then starts cron
+# restore container entrypoint — DR toolbox for standby init and failover.
+# Idles until the operator execs in and runs init-standby.sh or promote.sh.
 set -e
 
 # Required config (defined in .env, see .env.example) — fail fast if missing.
@@ -7,20 +8,10 @@ set -e
 : "${PG_CONTAINER:?required env var PG_CONTAINER not set}"
 : "${DATA_DIR:?required env var DATA_DIR not set}"
 : "${PGBACKREST_CIPHER_PASS:?required env var PGBACKREST_CIPHER_PASS not set (see .env.example)}"
-: "${RESTORE_SYNC_CRON:?required env var RESTORE_SYNC_CRON not set (see .env.example)}"
 
-# cron jobs do NOT inherit the container environment, so the vars sync.sh needs
-# are baked into the command line as env-prefix assignments.
-cat > /etc/cron.d/pgbackrest <<CRON
-# Sync from remote stanza
-${RESTORE_SYNC_CRON}  postgres  REMOTE_STANZA='${REMOTE_STANZA}' PG_CONTAINER='${PG_CONTAINER}' DATA_DIR='${DATA_DIR}' PGBACKREST_CIPHER_PASS='${PGBACKREST_CIPHER_PASS}' /usr/local/bin/sync.sh >> /var/log/pgbackrest/sync.log 2>&1
-CRON
-
-chmod 644 /etc/cron.d/pgbackrest
-
-# Grant the postgres user (which cron runs sync.sh as) access to the Docker socket,
-# so sync.sh can `docker stop/start` the pg container. The socket's group GID on the
-# host varies, so detect it at runtime and add postgres to a group with that GID.
+# Grant the postgres user (which the scripts run as) access to the Docker socket,
+# so it can `docker stop/start/exec` the pg container. The socket's group GID on
+# the host varies, so detect it at runtime and add postgres to a group with that GID.
 DOCKER_SOCKET_GID="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || true)"
 if [ -n "$DOCKER_SOCKET_GID" ] && [ "$DOCKER_SOCKET_GID" != "0" ]; then
   DOCKER_GROUP="$(getent group "$DOCKER_SOCKET_GID" 2>/dev/null | cut -d: -f1)"
@@ -31,8 +22,9 @@ if [ -n "$DOCKER_SOCKET_GID" ] && [ "$DOCKER_SOCKET_GID" != "0" ]; then
   usermod -aG "$DOCKER_GROUP" postgres 2>/dev/null || true
 fi
 
-echo "Restore container started — remote stanza=${REMOTE_STANZA}"
-echo "Cron schedule:"
-cat /etc/cron.d/pgbackrest
+echo "Restore container ready — remote stanza=${REMOTE_STANZA}"
+echo ""
+echo "  Build standby (once):  docker exec -u postgres \$(hostname) /usr/local/bin/init-standby.sh"
+echo "  Failover (promote):    docker exec -u postgres \$(hostname) /usr/local/bin/promote.sh"
 
 exec "$@"

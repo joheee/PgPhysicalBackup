@@ -1,5 +1,5 @@
 #!/bin/bash
-# start.sh — Generates configs from templates, starts containers based on ROLE.
+# start.sh — Generates configs from templates and starts containers based on ROLE.
 # Run this on every VM boot or after changing .env values.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -11,7 +11,7 @@ fi
 
 MY_STANZA="${MY_STANZA:-changeme}"
 REMOTE_STANZA="${REMOTE_STANZA:-changeme}"
-ROLE="${ROLE:-active}"
+ROLE="${ROLE:-primary}"
 S3_BUCKET="${S3_BUCKET:-changeme}"
 AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 S3_ENDPOINT="${S3_ENDPOINT:-s3.us-east-1.amazonaws.com}"
@@ -48,25 +48,23 @@ docker compose build
 # ─── Start PG (always running on both VMs) ──────────────
 docker compose up -d pg
 
-# ─── Role-specific container startup ────────────────────
-if [ "${ROLE}" = "active" ]; then
+# ─── Role-specific container ────────────────────────────
+# primary : backup container schedules full/diff/check backups of MY_STANZA.
+# standby : restore container idles as a DR toolbox (init-standby / promote).
+if [ "${ROLE}" = "standby" ]; then
     echo "============================================================"
-    echo " Role: ACTIVE"
-    echo "   → backup  container: STARTING  (cron: full/diff to ${MY_STANZA})"
-    echo "   → restore container: STOPPED"
-    echo "============================================================"
-    docker compose up -d backup
-    docker compose stop restore 2>/dev/null || true
-    docker compose rm -f restore 2>/dev/null || true
-else
-    echo "============================================================"
-    echo " Role: STANDBY"
-    echo "   → restore container: STARTING  (cron: sync from ${REMOTE_STANZA})"
-    echo "   → backup  container: STOPPED"
+    echo " Role: STANDBY — starting restore container (read-only warm standby toolbox)"
     echo "============================================================"
     docker compose up -d restore
     docker compose stop backup 2>/dev/null || true
     docker compose rm -f backup 2>/dev/null || true
+else
+    echo "============================================================"
+    echo " Role: PRIMARY — starting backup container"
+    echo "============================================================"
+    docker compose up -d backup
+    docker compose stop restore 2>/dev/null || true
+    docker compose rm -f restore 2>/dev/null || true
 fi
 
 echo ""
