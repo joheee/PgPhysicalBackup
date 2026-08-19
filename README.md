@@ -79,7 +79,13 @@ cp .env.example .env        # set S3_BUCKET, PGBACKREST_CIPHER_PASS (keep STANZA
 ./start.sh
 ```
 
-`start.sh` auto-creates the stanza, so archiving and the backup cron work immediately. Verify:
+`start.sh` auto-creates the stanza, so archiving and the backup cron work immediately. If you need to create it manually (or the auto-create didn't run):
+
+```bash
+docker exec -u postgres pg pgbackrest --stanza=pg stanza-create
+```
+
+Verify:
 
 ```bash
 docker exec pg psql -U postgres -c "SELECT pg_is_in_recovery();"   # expect f (primary)
