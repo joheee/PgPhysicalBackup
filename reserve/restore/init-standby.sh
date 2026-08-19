@@ -28,6 +28,9 @@ echo "[$(date -Iseconds)] Stopping PG (container=${PG_CONTAINER})..."
 docker stop "$PG_CONTAINER" 2>/dev/null || true
 sleep 2
 
+echo "[$(date -Iseconds)] Clearing data dir ${DATA_DIR} ..."
+find "$DATA_DIR" -mindepth 1 -delete
+
 echo "[$(date -Iseconds)] Restoring ${REMOTE_STANZA} as a standby (--type=standby → standby.signal)..."
 pgbackrest --stanza="$REMOTE_STANZA" \
   --pg1-path="$DATA_DIR" \
