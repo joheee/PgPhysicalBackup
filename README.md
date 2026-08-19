@@ -47,16 +47,23 @@ flowchart LR
 ## Repository layout
 
 ```
-docker-compose.yml            # pg + backup services
-start.sh                      # generate configs, build, start pg + backup
-restore.sh                    # DR: restore latest backup on a fresh host
-.env.example                  # all configuration
-pg/Dockerfile                 # postgres:17 + pgBackRest
-backup/Dockerfile             # cron + pgBackRest
-backup/entrypoint.sh          # renders /etc/cron.d/pgbackrest from .env
-configs/pg-pgbackrest.conf.tmpl     # archive-push / archive-get config
-configs/backup-pgbackrest.conf.tmpl # backup config (retention/compression)
-pgadmin/                      # optional pgAdmin UI
+.
+├── docker-compose.yml                 # pg + backup services
+├── start.sh                           # generate configs, build, start pg + backup
+├── restore.sh                         # DR: restore latest backup on a fresh host
+├── .env.example                       # all configuration
+├── pg/
+│   └── Dockerfile                     # postgres:17 + pgBackRest
+├── backup/
+│   ├── Dockerfile                     # cron + pgBackRest
+│   └── entrypoint.sh                  # renders /etc/cron.d/pgbackrest from .env
+├── configs/
+│   ├── pg-pgbackrest.conf.tmpl        # archive-push / archive-get config
+│   └── backup-pgbackrest.conf.tmpl    # backup config (retention/compression)
+└── pgadmin/                           # optional pgAdmin UI
+    ├── docker-compose.yml             # pgAdmin service (host port 5435)
+    ├── .env.example                   # pgAdmin login
+    └── servers.json.example           # pre-configured server
 ```
 
 ## Prerequisites
