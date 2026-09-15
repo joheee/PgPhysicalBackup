@@ -16,3 +16,5 @@ pgbackrest-spool/
 
 # ─── pgAdmin data (container-owned) ───────
 pgadmin-data/
+
+.claude

@@ -2,8 +2,9 @@
 # restore.sh — DR: rebuild THIS host from the latest S3 backup (single-PG model).
 #
 # Use on a fresh/replacement EC2 VM:
-#   1. Clone repo, cp .env.example .env, set S3_BUCKET / PGBACKREST_CIPHER_PASS / STANZA
-#      to the SAME values as the source instance.
+#   1. Clone repo, cp .env.example .env, set PGBACKREST_S3_BUCKET /
+#      PGBACKREST_CIPHER_PASS / PGBACKREST_STANZA to the SAME values as the source
+#      instance.
 #   2. ./restore.sh
 #
 # Restores the latest backup (preserving the database system-id, so archiving to
@@ -15,11 +16,11 @@ if [ -f .env ]; then
     set -a; source .env; set +a
 fi
 
-STANZA="${STANZA:-pg}"
-: "${S3_BUCKET:?S3_BUCKET must be set in .env}"
+PGBACKREST_STANZA="${PGBACKREST_STANZA:-pg}"
+: "${PGBACKREST_S3_BUCKET:?PGBACKREST_S3_BUCKET must be set in .env}"
 : "${PGBACKREST_CIPHER_PASS:?PGBACKREST_CIPHER_PASS must be set in .env}"
 
-echo "=== Restoring stanza=${STANZA} from bucket=${S3_BUCKET} ==="
+echo "=== Restoring stanza=${PGBACKREST_STANZA} from bucket=${PGBACKREST_S3_BUCKET} ==="
 
 # 1. Generate configs + dirs (same substitution as start.sh)
 ./start.sh gen-configs
@@ -36,7 +37,7 @@ find pg-data -mindepth 1 -delete
 docker compose run --rm --no-deps --user postgres --entrypoint pgbackrest \
     -e PGBACKREST_CIPHER_PASS="$PGBACKREST_CIPHER_PASS" \
     -e HOME=/var/lib/postgresql \
-    pg --stanza="$STANZA" --pg1-path=/var/lib/postgresql/data --log-level-console=info restore
+    pg --stanza="$PGBACKREST_STANZA" --pg1-path=/var/lib/postgresql/data --log-level-console=info restore
 
 # 5. Start pg (replays WAL to the latest, comes up writable) + backup
 docker compose up -d pg

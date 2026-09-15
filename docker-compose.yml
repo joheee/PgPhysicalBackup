@@ -16,14 +16,16 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
       PGBACKREST_CIPHER_PASS: ${PGBACKREST_CIPHER_PASS:-changeme}
-      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_DEFAULT_REGION: ${PGBACKREST_AWS_DEFAULT_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${PGBACKREST_AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${PGBACKREST_AWS_SECRET_ACCESS_KEY:-}
     command: >
       postgres
       -c archive_mode=on
-      -c archive_command='pgbackrest --stanza=${STANZA:-pg} archive-push %p'
+      -c archive_command='pgbackrest --stanza=${PGBACKREST_STANZA:-pg} archive-push %p'
       -c wal_level=replica
-      -c archive_timeout=${ARCHIVE_TIMEOUT:-60}
-      -c restore_command='pgbackrest --stanza=${STANZA:-pg} archive-get %f "%p"'
+      -c archive_timeout=${PGBACKREST_ARCHIVE_TIMEOUT:-60}
+      -c restore_command='pgbackrest --stanza=${PGBACKREST_STANZA:-pg} archive-get %f "%p"'
     volumes:
       - ./pg-data:/var/lib/postgresql/data
       - ./pg-socket:/var/run/postgresql
@@ -43,14 +45,32 @@ services:
       dockerfile: Dockerfile
     container_name: pg-cron-backup
     environment:
-      STANZA: ${STANZA:-pg}
+      PGBACKREST_STANZA: ${PGBACKREST_STANZA:-pg}
       PGBACKREST_CIPHER_PASS: ${PGBACKREST_CIPHER_PASS:-changeme}
-      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
-      BACKUP_FULL_CRON: ${BACKUP_FULL_CRON:-}
-      BACKUP_DIFF_CRON: ${BACKUP_DIFF_CRON:-}
-      BACKUP_CHECK_CRON: ${BACKUP_CHECK_CRON:-}
+      AWS_DEFAULT_REGION: ${PGBACKREST_AWS_DEFAULT_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${PGBACKREST_AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${PGBACKREST_AWS_SECRET_ACCESS_KEY:-}
+      PGBACKREST_BACKUP_FULL_CRON: ${PGBACKREST_BACKUP_FULL_CRON:-}
+      PGBACKREST_BACKUP_DIFF_CRON: ${PGBACKREST_BACKUP_DIFF_CRON:-}
+      PGBACKREST_BACKUP_CHECK_CRON: ${PGBACKREST_BACKUP_CHECK_CRON:-}
     volumes:
       - ./pg-data:/var/lib/postgresql/data:ro
       - ./pg-socket:/var/run/postgresql
       - ./configs/backup-pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
     restart: unless-stopped
+
+  # ── pgAdmin (web UI, optional) ──────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin
+    ports:
+      - "5435:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@test.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-changeme}
+    volumes:
+      - ./pgadmin-data:/var/lib/pgadmin
+    restart: unless-stopped
+    depends_on:
+      pg:
+        condition: service_healthy

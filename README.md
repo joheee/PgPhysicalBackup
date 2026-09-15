@@ -60,22 +60,18 @@ flowchart LR
 ├── configs/
 │   ├── pg-pgbackrest.conf.tmpl        # archive-push / archive-get config
 │   └── backup-pgbackrest.conf.tmpl    # backup config (retention/compression)
-└── pgadmin/                           # optional pgAdmin UI
-    ├── docker-compose.yml             # pgAdmin service (host port 5435)
-    ├── .env.example                   # pgAdmin login
-    └── servers.json.example           # pre-configured server
 ```
 
 ## Prerequisites
 
 - An S3 bucket for the pgBackRest repo.
-- AWS credentials: an EC2 **IAM instance profile** with S3 access to that bucket (`repo1-s3-key-type=auto`). Alternatively, static keys via `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`.
+- AWS credentials: an EC2 **IAM instance profile** with S3 access to that bucket (`repo1-s3-key-type=auto`). Alternatively, static keys via `PGBACKREST_AWS_ACCESS_KEY_ID` / `PGBACKREST_AWS_SECRET_ACCESS_KEY`.
 - The same `PGBACKREST_CIPHER_PASS` on every host that touches the repo (generate with `openssl rand -base64 48`).
 
 ## Quick start (fresh deploy)
 
 ```bash
-cp .env.example .env        # set S3_BUCKET, PGBACKREST_CIPHER_PASS (keep STANZA default)
+cp .env.example .env        # set PGBACKREST_S3_BUCKET, PGBACKREST_CIPHER_PASS (keep PGBACKREST_STANZA default)
 ./start.sh
 ```
 
@@ -95,7 +91,7 @@ docker exec -u postgres pg pgbackrest --stanza=pg info             # stanza exis
 ## Disaster recovery (fresh host)
 
 ```bash
-cp .env.example .env        # SAME S3_BUCKET / PGBACKREST_CIPHER_PASS / STANZA as source
+cp .env.example .env        # SAME PGBACKREST_S3_BUCKET / PGBACKREST_CIPHER_PASS / PGBACKREST_STANZA as source
 ./restore.sh
 ```
 
@@ -109,18 +105,19 @@ docker exec pg psql -U postgres -c "SELECT pg_is_in_recovery();"   # expect f
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `STANZA` | `pg` | pgBackRest stanza name (one DB = one stanza) |
+| `PGBACKREST_STANZA` | `pg` | pgBackRest stanza name (one DB = one stanza) |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` | `postgres` / `changeme` | PG superuser |
-| `S3_BUCKET` | — | pgBackRest repo bucket (required) |
-| `AWS_DEFAULT_REGION` | `us-east-1` | S3 region |
-| `S3_ENDPOINT` | `s3.us-east-1.amazonaws.com` | S3 endpoint |
+| `PGBACKREST_S3_BUCKET` | — | pgBackRest repo bucket (required) |
+| `PGBACKREST_AWS_DEFAULT_REGION` | `us-east-1` | S3 region |
+| `PGBACKREST_S3_ENDPOINT` | `s3.us-east-1.amazonaws.com` | S3 endpoint |
+| `PGBACKREST_AWS_ACCESS_KEY_ID` / `PGBACKREST_AWS_SECRET_ACCESS_KEY` | — | Static IAM *user* keys for non-EC2 hosts (VPS). Leave unset on EC2 — `auto` uses the instance profile. |
 | `PGBACKREST_CIPHER_PASS` | `changeme` | AES-256-CBC passphrase (required) |
-| `RETENTION_FULL` / `RETENTION_DIFF` | `2` / `4` | Backup retention (count) |
-| `ARCHIVE_TIMEOUT` | `60` | PG `archive_timeout` (seconds) — forces a WAL switch |
-| `BACKUP_FULL_CRON` | `"07 2 * * 0"` | Full backup schedule (Sun 02:07) |
-| `BACKUP_DIFF_CRON` | `"07 2 * * 1-6"` | Differential schedule (Mon–Sat 02:07) |
-| `BACKUP_CHECK_CRON` | `"17 7 * * *"` | Health check schedule (daily 07:17) |
-| `COMPRESS_LEVEL` / `COMPRESS_LEVEL_NETWORK` / `PROCESS_MAX` | `6` / `3` / `4` | Optional overrides |
+| `PGBACKREST_RETENTION_FULL` / `PGBACKREST_RETENTION_DIFF` | `2` / `4` | Backup retention (count) |
+| `PGBACKREST_ARCHIVE_TIMEOUT` | `60` | PG `archive_timeout` (seconds) — forces a WAL switch |
+| `PGBACKREST_BACKUP_FULL_CRON` | `"07 2 * * 0"` | Full backup schedule (Sun 02:07) |
+| `PGBACKREST_BACKUP_DIFF_CRON` | `"07 2 * * 1-6"` | Differential schedule (Mon–Sat 02:07) |
+| `PGBACKREST_BACKUP_CHECK_CRON` | `"17 7 * * *"` | Health check schedule (daily 07:17) |
+| `PGBACKREST_COMPRESS_LEVEL` / `PGBACKREST_COMPRESS_LEVEL_NETWORK` / `PGBACKREST_PROCESS_MAX` | `6` / `3` / `4` | Optional overrides |
 
 Cron values contain spaces → keep them **quoted** in `.env` (`start.sh` sources it with `source`).
 

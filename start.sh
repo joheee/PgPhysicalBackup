@@ -9,28 +9,28 @@ if [ -f .env ]; then
     set -a; source .env; set +a
 fi
 
-STANZA="${STANZA:-pg}"
-S3_BUCKET="${S3_BUCKET:-changeme}"
-AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
-S3_ENDPOINT="${S3_ENDPOINT:-s3.us-east-1.amazonaws.com}"
-COMPRESS_LEVEL="${COMPRESS_LEVEL:-6}"
-COMPRESS_LEVEL_NETWORK="${COMPRESS_LEVEL_NETWORK:-3}"
-PROCESS_MAX="${PROCESS_MAX:-4}"
-RETENTION_FULL="${RETENTION_FULL:-2}"
-RETENTION_DIFF="${RETENTION_DIFF:-4}"
+PGBACKREST_STANZA="${PGBACKREST_STANZA:-pg}"
+PGBACKREST_S3_BUCKET="${PGBACKREST_S3_BUCKET:-changeme}"
+PGBACKREST_AWS_DEFAULT_REGION="${PGBACKREST_AWS_DEFAULT_REGION:-us-east-1}"
+PGBACKREST_S3_ENDPOINT="${PGBACKREST_S3_ENDPOINT:-s3.us-east-1.amazonaws.com}"
+PGBACKREST_COMPRESS_LEVEL="${PGBACKREST_COMPRESS_LEVEL:-6}"
+PGBACKREST_COMPRESS_LEVEL_NETWORK="${PGBACKREST_COMPRESS_LEVEL_NETWORK:-3}"
+PGBACKREST_PROCESS_MAX="${PGBACKREST_PROCESS_MAX:-4}"
+PGBACKREST_RETENTION_FULL="${PGBACKREST_RETENTION_FULL:-2}"
+PGBACKREST_RETENTION_DIFF="${PGBACKREST_RETENTION_DIFF:-4}"
 
 gen_configs() {
     for tmpl in configs/*.conf.tmpl; do
         target="${tmpl%.tmpl}"
-        sed -e "s/__STANZA__/${STANZA}/g" \
-            -e "s|__S3_BUCKET__|${S3_BUCKET}|g" \
-            -e "s|__AWS_DEFAULT_REGION__|${AWS_DEFAULT_REGION}|g" \
-            -e "s|__S3_ENDPOINT__|${S3_ENDPOINT}|g" \
-            -e "s/__COMPRESS_LEVEL__/${COMPRESS_LEVEL}/g" \
-            -e "s/__COMPRESS_LEVEL_NETWORK__/${COMPRESS_LEVEL_NETWORK}/g" \
-            -e "s/__PROCESS_MAX__/${PROCESS_MAX}/g" \
-            -e "s/__RETENTION_FULL__/${RETENTION_FULL}/g" \
-            -e "s/__RETENTION_DIFF__/${RETENTION_DIFF}/g" \
+        sed -e "s/__STANZA__/${PGBACKREST_STANZA}/g" \
+            -e "s|__S3_BUCKET__|${PGBACKREST_S3_BUCKET}|g" \
+            -e "s|__AWS_DEFAULT_REGION__|${PGBACKREST_AWS_DEFAULT_REGION}|g" \
+            -e "s|__S3_ENDPOINT__|${PGBACKREST_S3_ENDPOINT}|g" \
+            -e "s/__COMPRESS_LEVEL__/${PGBACKREST_COMPRESS_LEVEL}/g" \
+            -e "s/__COMPRESS_LEVEL_NETWORK__/${PGBACKREST_COMPRESS_LEVEL_NETWORK}/g" \
+            -e "s/__PROCESS_MAX__/${PGBACKREST_PROCESS_MAX}/g" \
+            -e "s/__RETENTION_FULL__/${PGBACKREST_RETENTION_FULL}/g" \
+            -e "s/__RETENTION_DIFF__/${PGBACKREST_RETENTION_DIFF}/g" \
             "$tmpl" > "$target"
         echo "Generated: $target"
     done
@@ -58,11 +58,11 @@ for _ in $(seq 1 30); do
     sleep 2
 done
 
-if docker compose exec -T -u postgres pg pgbackrest --stanza="$STANZA" info >/dev/null 2>&1; then
-    echo "Stanza '${STANZA}' already exists."
+if docker compose exec -T -u postgres pg pgbackrest --stanza="$PGBACKREST_STANZA" info >/dev/null 2>&1; then
+    echo "Stanza '${PGBACKREST_STANZA}' already exists."
 else
-    echo "Creating stanza '${STANZA}'..."
-    docker compose exec -T -u postgres pg pgbackrest --stanza="$STANZA" stanza-create
+    echo "Creating stanza '${PGBACKREST_STANZA}'..."
+    docker compose exec -T -u postgres pg pgbackrest --stanza="$PGBACKREST_STANZA" stanza-create
 fi
 
 # ─── Start backup scheduler ──────────────────────────────
