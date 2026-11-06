@@ -91,7 +91,9 @@ database's archive. `archive_mode=off` stops that.
 - **Restore safety:** restores go into an empty data directory, `initdb` never
   runs before a restore, nothing wipes data without a prompt or `--yes`,
   PITR uses `--target-action=promote`, and the restored copy runs with
-  `archive_mode=off`.
+  `archive_mode=off`. The restore container never mounts `pg-data`; it clears
+  only a volume it found empty and restored into itself, and never after a
+  delta run.
 - **A backup counts only once it has restored.** The scenarios below are run
   and reported, not just documented.
 
@@ -158,12 +160,24 @@ run.
    demos) and usable as an EC2 instance profile policy for a real host. The
    README lists the exact settings so anyone can repeat them; no AWS infrastructure
    code is part of this project.
-3. **`restore` service and drill (`drill/`).** The `restore` service in
-   Compose, plus `drill/run.sh`, which runs the scenarios end to end on a
-   throwaway stanza under `drill/<run-id>/` with a random cipher passphrase
-   (seed data, full backup, keep writing, differential, mistake, restores,
-   checks), so a demo never touches the real stanza. `drill/run.sh
-   --scenario <name>` runs one scenario; no argument runs the must-haves.
+3. **`restore` service and drill (`drill/`).**
+   - **`restore` service: built.** One `docker compose run --rm restore` is one
+     restore plus checks plus a report. Scenarios are chosen by environment
+     variables (`RESTORE_TYPE`/`RESTORE_TARGET`, `RESTORE_SET`,
+     `RESTORE_DB_INCLUDE`, `RESTORE_DELTA`, `RESTORE_KEEP`, `RESTORE_VERIFY`),
+     and an optional `EXPECT_FILE` (JSON) carries what only the source knows:
+     row counts, the canary table, the time the source died and an RPO limit.
+     `PGBACKREST_STANZA` and `PGBACKREST_REPO1_PATH` point it at another stanza.
+   - **`drill/run.sh`: planned.** It runs the scenarios end to end on a
+     throwaway stanza under `drill/<run-id>/` with a random cipher passphrase,
+     so a demo never touches the real stanza. The source is a throwaway
+     `drill-source` container (its own Compose profile) that archives to that
+     stanza and is started and removed by the script; the real `pg` is not
+     involved. Flow: seed data (pgbench, `orders`, `appdb`, a `canary` row every
+     few seconds), full backup, keep writing, differential, make the mistake
+     (kill, `DELETE`, restore point), write the `EXPECT_FILE`, call the restore
+     container per scenario, collect the reports. `drill/run.sh --scenario
+     <name>` runs one scenario; no argument runs the must-haves.
 4. **Report.** Each run writes a Markdown and JSON report: backup size and
    time, restore time, WAL replay time, RPO, each check pass/fail, pgBackRest
    and Postgres versions, machine size. Exits non-zero if any check fails.
@@ -237,6 +251,14 @@ run.
   listener. Readable logs and countdown built (see best practice above).
 - Real S3: bucket and scoped IAM user created by hand, `stanza-create`, `check`
   and a first full backup (`20261106-183638F`) succeeded.
+- `restore/` container built and run against the real S3 stanza: latest, point-in-time
+  (stopped before the test commit, confirmed from the Postgres log), named restore
+  point, older set and delta all pass; a bogus backup set and a non-empty target
+  fail loudly (exit 1 and 2); a failed or unbuildable report fails the run.
+  Measured on a 22.1 MB test database: 239.8 s with one worker, 59 s with four,
+  delta 7.7 s (README "Measured so far"). These are not benchmark numbers.
+- Found and fixed while building it: the reserved word `label` breaks jq 1.6
+  reports, and `--db-include` rejects system databases.
 
 **Still to do**
 - Set real `ALERT_WEBHOOK_URL` and `HEALTHCHECK_URL_*` and see a success ping and
@@ -245,20 +267,24 @@ run.
   (versioning, SSE-S3, lifecycle on `drill/` and noncurrent only), then tick
   the AWS box. The README is written; `checks.yml` is written and passes locally,
   and needs a first green run on GitHub before its box is ticked.
-- Day 2: `restore` service, `drill/run.sh`, must-have scenarios, reports.
-- Day 3: extra scenarios, 10 GB benchmark, README rewrite.
+- Day 2 (rest): `drill/run.sh` with a throwaway source database, seeded data and an
+  `EXPECT_FILE` per scenario; RPO measured from the canary table; the single-database
+  scenario (needs the drill's `appdb`); the failure scenario; committed sample reports
+  in `docs/reports/`.
+- Day 3: remaining extra scenarios, 10 GB benchmark, README final pass (a runbook per
+  scenario, real sample reports, benchmark table).
 
 ## Plan (3 days)
 
 | Day | Work |
 |---|---|
 | 1 | Harden the kit and add alerting (objective 1). Bucket, IAM policy and user made by hand and written up in the README. `checks.yml` green. |
-| 2 | `restore` service and `drill/run.sh` with the four must-have scenarios, checks and report. |
+| 2 | `restore` service (done) and `drill/run.sh` with the four must-have scenarios, checks and report. |
 | 3 | Extra scenarios 5–8, 10 GB benchmark and `docs/benchmark.md`. README handover with diagram, runbooks, report and cost. Upwork portfolio entry. |
 
 ## Tools and software
 
-PostgreSQL 17 · pgBackRest · Amazon S3 · AWS IAM · Docker + Compose · Bash · pgbench · amcheck
+PostgreSQL 17 · pgBackRest · Amazon S3 · AWS IAM · Docker + Compose · jq · Bash · pgbench · amcheck
 (`pg_amcheck`) · Healthchecks.io (dead-man's switch) · GitHub Actions
 (checks) · shellcheck · hadolint · actionlint · Mermaid
 
@@ -268,7 +294,7 @@ PostgreSQL 17 · pgBackRest · Amazon S3 · AWS IAM · Docker + Compose · Bash 
 - [ ] Backup jobs exit non-zero on failure, log to `docker logs`, alert through a webhook, and ping a dead-man's switch on success.
 - [ ] The S3 bucket (encrypted, private, versioned, lifecycle only on `drill/` and old versions) and the stanza-scoped IAM policy and user exist, and the README "AWS setup" section records the exact settings.
 - [ ] `checks.yml` runs shellcheck, hadolint, actionlint, and compose config on every PR (green).
-- [ ] The `restore` service restores into an empty directory with `archive_mode=off`, runs the checks and writes a Markdown/JSON report.
+- [x] The `restore` service restores into an empty directory with `archive_mode=off`, runs the checks and writes a Markdown/JSON report.
 - [ ] Must-have scenarios pass and are reported: latest restore with RPO, PITR before a `DELETE`, `pgbackrest verify` + `pg_amcheck`, failure alert.
 - [ ] Extra scenarios pass and are reported: named restore point, older set, single database, delta restore.
 - [ ] `docs/benchmark.md` has measured backup and restore times for a ~10 GB database.

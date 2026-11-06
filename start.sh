@@ -84,7 +84,10 @@ gen_configs
 gen_s3_keys_env
 
 # ─── Create host directories ────────────────────────────
-mkdir -p pg-data pg-socket pgbackrest-spool
+mkdir -p pg-data pg-socket pgbackrest-spool reports
+# The restore container runs as uid 999 and writes its reports here; a sticky
+# world-writable directory lets it do that while you stay able to delete them.
+chmod 1777 reports
 chown -R 999:999 pg-data pg-socket pgbackrest-spool 2>/dev/null || true
 
 # ─── Build images + start PG ─────────────────────────────

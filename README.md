@@ -4,7 +4,7 @@
 
 Physical PostgreSQL 17 backups with **pgBackRest → Amazon S3**, run by Docker Compose: continuous WAL archiving, scheduled full and differential backups, client-side AES-256 encryption, alerts when a job fails or stops running, and a script to rebuild a host from the latest backup.
 
-The goal of the project is **backups you can prove restore, with measured numbers**. Part of that is built and tested today; the rest is planned. See [Status](#status).
+The goal of the project is **backups you can prove restore, with measured numbers**. A throwaway `restore` container now restores from S3, checks the result and writes a report; the scripted drill that exercises every scenario is still planned. See [Status](#status).
 
 ## Status
 
@@ -15,11 +15,11 @@ The goal of the project is **backups you can prove restore, with measured number
 | Failure alerts (non-zero exit, webhook, dead-man's switch) | Built. Tested against a stand-in listener; not yet seen with a real Slack / Healthchecks.io endpoint. |
 | Readable logs (schedule table, countdown, live view) | Built and tested. |
 | CI (`checks.yml`: shellcheck, hadolint, actionlint, compose config) | Built; every step passes locally. |
-| `restore` container and `drill/run.sh` (latest restore with RPO, point-in-time recovery, `verify` + `pg_amcheck`, failure scenario) | **Planned.** |
-| Extra scenarios (named restore point, older backup set, single database, delta restore) | **Planned.** |
-| 10 GB benchmark, sample reports | **Planned.** |
+| `restore` container: latest, point-in-time, named restore point, older set and delta restores into an empty directory with `archive_mode=off`, checks, Markdown + JSON report | Built and run against the real S3 stanza. All scenarios pass except single-database, which needs a user database (see below). |
+| `drill/run.sh`: self-contained drill on a throwaway stanza with seeded data (RPO, row-count checks, `verify`, failure scenario) | **Planned.** The container already supports its expectation file; no data has been seeded yet. |
+| Single-database restore, 10 GB benchmark, committed sample reports | **Planned.** |
 
-Until the `restore` container exists, the only restore path is `restore.sh` (rebuild this host from the latest backup). Nothing in this README claims a restore time or RPO yet, because none has been measured.
+So far the measured numbers come from a 22 MB test database (see [Measured so far](#measured-so-far)). RPO has not been measured yet, because it needs the drill's canary data.
 
 ## Architecture
 
@@ -28,7 +28,7 @@ flowchart LR
     subgraph HOST["Docker host (laptop, VPS or EC2)"]
         PG[("pg<br/>PostgreSQL 17 + pgBackRest")]
         BK["pg-cron-backup<br/>cron: full / diff / check<br/>run-job.sh wrapper"]
-        RS["restore container<br/>(planned)"]
+        RS["restore container<br/>(on demand)"]
         PG ---|"unix socket + pg-data"| BK
     end
 
@@ -59,6 +59,12 @@ flowchart LR
 ├── restore.sh                  # DR: rebuild this host from the latest backup
 ├── .env.example                # all configuration (copy to .env, chmod 600)
 ├── pg/Dockerfile               # postgres:17.11 (digest-pinned) + pgBackRest 2.60.0
+├── restore/
+│   ├── Dockerfile              # same base + pgBackRest, plus jq
+│   ├── entrypoint.sh           # preflight → restore → start → wait → checks → report → clean up
+│   ├── checks.sh               # generic checks and the EXPECT_FILE checks
+│   └── report.sh               # JSON + Markdown report
+├── reports/                    # restore reports (git-ignored; copy keepers to docs/reports/)
 ├── backup/
 │   ├── Dockerfile
 │   ├── entrypoint.sh           # root-only job env file, schedule-only crontab, startup table
@@ -217,7 +223,8 @@ S3 storage only, under about $1 a month with the default retention (2 full and 4
 | `HEALTHCHECK_URL_FULL` / `_DIFF` / `_CHECK` | unset | One Healthchecks.io check per job |
 | `COUNTDOWN_INTERVAL_SECONDS` | `1` | Seconds between countdown lines in `docker logs`; `0` = off |
 | `PGADMIN_DEFAULT_EMAIL` / `_PASSWORD` | `admin@test.com` / unset | pgAdmin login (profile `pgadmin`) |
-| `PGBACKREST_COMPRESS_LEVEL`, `_COMPRESS_LEVEL_NETWORK`, `_PROCESS_MAX` | `6`, `3`, `4` | Optional tuning |
+| `PGBACKREST_COMPRESS_LEVEL`, `_COMPRESS_LEVEL_NETWORK`, `_PROCESS_MAX` | `6`, `3`, `4` | Optional tuning. `_PROCESS_MAX` is also the worker count of the restore container. |
+| `RESTORE_*`, `EXPECT_FILE` | unset | Restore container scenarios, see [Restore container](#restore-container) |
 
 Cron values contain spaces, so keep them **quoted** (`start.sh` sources the file). All cron times are UTC.
 
@@ -283,6 +290,69 @@ docker compose --profile pgadmin up -d pgadmin      # http://localhost:5435
 
 Set `PGADMIN_DEFAULT_PASSWORD` in `.env` first. Register the server with **host `pg`, port `5432`**, user `postgres` and your `POSTGRES_PASSWORD`. Not `localhost`: inside the pgAdmin container that is pgAdmin itself. From tools on your machine use `127.0.0.1:5434`. The `pgadmin-data` directory must be owned by uid 5050.
 
+### Restore container
+
+Proves a backup restores, without touching the running database. It never mounts `pg-data`: it restores into its own named volume (`pgdemo_restore-data`), starts Postgres on a unix socket only with `archive_mode=off`, waits for recovery to finish, runs the checks, writes a report and exits. Needs `./start.sh` to have run once (it generates the config and creates `reports/`).
+
+```bash
+docker compose run --rm restore                 # latest backup of the real stanza
+```
+
+The container exists only while a run is in progress (about 1.5 minutes for the test database) and is deleted afterwards (`--rm`); it never shows in `docker compose ps`. What stays: the `pgdemo-restore` image, the (emptied) volume and `./reports/`.
+
+Scenarios are chosen with environment variables:
+
+```bash
+RESTORE_TYPE=time RESTORE_TARGET="2026-11-06 20:04:01+00" docker compose run --rm restore   # point-in-time
+RESTORE_TYPE=name RESTORE_TARGET=pre_migration            docker compose run --rm restore   # named restore point
+RESTORE_SET=20261106-183638F                              docker compose run --rm restore   # older backup set
+RESTORE_DB_INCLUDE=appdb                                  docker compose run --rm restore   # one user database
+RESTORE_KEEP=1 docker compose run --rm restore            # keep the restored data...
+RESTORE_DELTA=1 docker compose run --rm restore           # ...then repair it, fetching changed files only
+RESTORE_VERIFY=1 docker compose run --rm restore          # also run `pgbackrest verify` on the whole repo
+```
+
+| Variable | Meaning |
+|---|---|
+| `RESTORE_TYPE` / `RESTORE_TARGET` | `time` (a timestamp with a zone, such as `2026-11-06 20:04:01+00`) or `name` (a restore point). Always `--target-action=promote`. |
+| `RESTORE_SET` | A backup label from `pgbackrest info` |
+| `RESTORE_DB_INCLUDE` | A **user** database. pgBackRest always restores system databases, and the container rejects `postgres`, `template0` and `template1`. The other user databases come back as empty placeholders and must be dropped. |
+| `RESTORE_DELTA` | `1` restores onto an existing directory and only fetches changed files |
+| `RESTORE_KEEP` | `1` keeps the restored data after the run (clear it with `docker volume rm pgdemo_restore-data`) |
+| `RESTORE_VERIFY` | `1` also runs `pgbackrest verify` (downloads the whole repository) |
+| `EXPECT_FILE` | JSON of facts from the source (row counts, canary table, failure time, RPO limit); see `restore/checks.sh`. The drill supplies it. |
+| `PGBACKREST_STANZA` / `PGBACKREST_REPO1_PATH` | Point at another stanza or repository path (the drill uses these) |
+| `PGBACKREST_PROCESS_MAX` | Parallel download workers (default `4`) |
+
+**Checks:** the backup was found; the restore succeeded; recovery finished; `archive_mode` is `off`; data checksums are on; the server answers queries; `pg_amcheck --all` finds no corruption; for a targeted restore, Postgres's own log line showing where it stopped (for example `recovery stopping before commit of transaction 754` or `recovery stopping at restore point "restore_test_1"`); and, with an `EXPECT_FILE`, the row counts and RPO. The exit code is non-zero if any check fails, and a report that cannot be built also fails the run.
+
+**Safety:** the target must be empty (a plain run onto leftover data exits with code 2 and changes nothing); `initdb` never runs; the container only clears a directory that it found empty and restored into itself, never after a delta run; and it has no way to write into the stanza, because archiving is off.
+
+Each run saves `reports/<run-id>-<scenario>.json` and `.md`, for example:
+
+```
+| Backup restored | 20261106-183638F (full), 22.1 MB database, 2.9 MB in the repository |
+| Restore time | 59s (4 parallel workers) |
+| WAL replay time | 11.7s (Postgres start until recovery finished) |
+| Repository | upwork-pgbackrest /pgbackrest stanza pg |
+| Versions | PostgreSQL 17.11, pgBackRest 2.60.0 |
+```
+
+#### Measured so far
+
+From the real stanza, on one laptop against S3 in `ap-southeast-2`, restoring a **22.1 MB database (966 files)**. This is a tiny test database, not a benchmark; the 10 GB run is still planned.
+
+| Run | Restore time | WAL replay |
+|---|---|---|
+| Latest, 1 worker | 239.8 s | not recorded (report bug, since fixed) |
+| Latest, 4 workers | 59.0 s | 11.7 s |
+| Point-in-time (target 3 s before a commit) | 60.3 s | 13.7 s |
+| Named restore point | 64.4 s | 15.2 s |
+| Older set (explicit label) | 65.1 s | 17.7 s |
+| Delta onto the previous restore | 7.7 s | 15.7 s |
+
+Why a small database is slow: pgBackRest fetches every file with its own S3 request, and a cluster has about a thousand small files, so latency dominates, not size. Parallel workers gave about 4x here. Delta restore skips files that already match and was about 8x faster than a full restore. pgBackRest's `repo1-bundle` option groups small files at backup time and would cut the per-file requests; it applies only to new backups and has not been tried here.
+
 ### Disaster recovery (`restore.sh`)
 
 On a fresh or replacement host, with the same `PGBACKREST_S3_BUCKET`, `PGBACKREST_CIPHER_PASS` and `PGBACKREST_STANZA` as the source in `.env`:
@@ -303,7 +373,7 @@ It asks first, then stops `pg` and `backup`, wipes `pg-data` from a throwaway ro
 - **Secrets stay out of world-readable places.** pgBackRest does not expand `${VAR}` in its config, so the passphrase reaches it as the `PGBACKREST_REPO1_CIPHER_PASS` environment variable and never sits in a `.conf`. Cron jobs read a root-only (mode 600) env file inside the container; `/etc/cron.d` holds schedules only; nothing secret is on a command line or in a log. Static S3 keys live in `.env` (mode 600) and a generated mode-600 `configs/s3-keys.env`.
 - **Localhost-only ports** (`127.0.0.1:5434`, `127.0.0.1:5435`), pgAdmin off by default.
 - **Pinned versions:** images by tag and digest, pgBackRest by package version.
-- **Safe restores:** into an empty directory only, `initdb` never runs first, nothing is wiped without a prompt or `--yes`.
+- **Safe restores:** into an empty directory only, `initdb` never runs first, nothing is wiped without a prompt or `--yes`. The restore container restores into its own volume, with archiving off, so it cannot write into the stanza.
 - **No overlapping jobs:** pgBackRest's stanza lock stops two backups at once; the job logs it and exits non-zero.
 
 ## Core concepts (read before debugging)
@@ -336,6 +406,9 @@ docker exec -u postgres pg pgbackrest --stanza=pg stanza-create
 | `[040] unable to restore … contains files` | Restore target is not empty | Wipe the data directory first (`restore.sh` does) |
 | `[055] stop file does not exist` | `stanza-delete` needs `stop` first | Run `pgbackrest … stop` first |
 | `[038] postmaster.pid exists` | Postgres is running during `stanza-delete` | Add `--force` |
+| Restore container exits with code 2: `... is not empty` | A previous run kept its data (`RESTORE_KEEP=1` or a delta run) | `docker volume rm pgdemo_restore-data`, or run with `RESTORE_DELTA=1` |
+| Restore takes minutes for a tiny database | One S3 request per file, one worker | Raise `PGBACKREST_PROCESS_MAX`; consider `repo1-bundle` for new backups |
+| `[081] system databases (template0, postgres, etc.) are included by default` | `RESTORE_DB_INCLUDE` named a system database | Name a user database |
 | `invalid option 'backup-full-cron'` warnings | The schedule variables are visible to a manual `docker exec` | Harmless; the cron jobs don't see them |
 | Edited `.env` but nothing changed | Containers keep the environment they started with | `./start.sh` or `docker compose up -d` |
 
@@ -356,22 +429,22 @@ docker compose --profile pgadmin up -d pgadmin
 
 ## Checks (CI)
 
-`.github/workflows/checks.yml` runs on every pull request and push to `master`, with no AWS access and no secrets: `shellcheck` on every `*.sh`, `hadolint` on every `Dockerfile`, `actionlint` on the workflows, and `docker compose config` (also with the `pgadmin` profile). To run the same steps locally:
+`.github/workflows/checks.yml` runs on every pull request and push to `master`, with no AWS access and no secrets: `shellcheck` on every `*.sh`, `hadolint` on every `Dockerfile`, `actionlint` on the workflows, and `docker compose config` (also with the `pgadmin` and `restore` profiles). To run the same steps locally:
 
 ```bash
 git ls-files '*.sh' | xargs shellcheck
 for f in $(git ls-files '*Dockerfile'); do docker run --rm -i hadolint/hadolint:v2.15.1 < "$f"; done
 docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12
-docker compose --env-file .env.example config -q
+docker compose --env-file .env.example --profile pgadmin --profile restore config -q
 ```
 
 ## Roadmap
 
-Planned, in order (see `GOALS.md` for the full definition of done):
+Done: the `restore` container (see [Restore container](#restore-container)). Still planned, in order (see `GOALS.md` for the full definition of done):
 
-1. **`restore` container + `drill/run.sh`.** A throwaway Compose-profile container that restores into an empty directory with `archive_mode=off`, runs the checks and writes a Markdown and JSON report. The drill runs on its own stanza under `drill/<run-id>/` with a random passphrase and never touches the real stanza.
-2. **Must-have scenarios:** latest restore after a crash (`docker kill pg`) with measured restore time and RPO; point-in-time recovery before a `DELETE`; `pgbackrest verify` + `pg_amcheck`; a caught failure (broken credentials, stopped archiving).
-3. **Extras:** named restore point, older backup set, single database, delta restore.
+1. **`drill/run.sh`.** A self-contained drill on its own stanza under `drill/<run-id>/` with a random passphrase and a throwaway source database, so it never touches the real stanza. It seeds pgbench, `orders` and `canary` data, takes a full and a differential backup, keeps writing, then calls the restore container once per scenario with an `EXPECT_FILE`.
+2. **Must-have scenarios with their numbers:** latest restore after a crash (`docker kill pg`) with measured RPO; point-in-time recovery before a `DELETE FROM orders`, proving the rows are back; `pgbackrest verify` + `pg_amcheck`; a caught failure (broken credentials, stopped archiving).
+3. **Extras:** named restore point before a bad migration, older backup set, single database (needs the drill's `appdb`), delta restore timed against a full one.
 4. **Measured at ~10 GB:** backup time, compressed size, restore time and WAL replay time, with sample reports saved under `docs/reports/`.
 
 Stretch: a weekly GitHub Actions drill against S3 over OIDC, and a monthly restore test on the client's server.
