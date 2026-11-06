@@ -144,19 +144,19 @@ run.
    and the pgBackRest package version pinned. Cron job output in
    `docker logs`, non-zero exits, webhook alert on failure and a dead-man's
    switch ping on success (URLs in `.env`, optional).
-2. **AWS side, set up by hand and documented (`docs/aws-setup.md`).** One S3
+2. **AWS side, set up by hand and documented (README "AWS setup").** One S3
    bucket for the pgBackRest repo, made in the console or CLI with: public
    access blocked, bucket-owner-enforced ownership, SSE-S3, versioning with
    noncurrent versions expired after 7 days (a deleted backup can be recovered
    for a week), abort incomplete multipart uploads, and an expiry rule on the
    `drill/` prefix only. An IAM policy scoped to one stanza prefix (the JSON is
-   committed in `docs/`: `s3:ListBucket` on the bucket limited to the
+   in the README: `s3:ListBucket` on the bucket limited to the
    `pgbackrest/` and `drill/` prefixes, and `GetObject`, `PutObject`,
    `DeleteObject` on those prefixes only; no `DeleteObjectVersion`, so a
    leaked key can't destroy the noncurrent versions), attached to an IAM user for the local demo (its
    access key is kept only in the mode-600 `.env`, and deactivated after
    demos) and usable as an EC2 instance profile policy for a real host. The
-   doc lists the exact settings so anyone can repeat them; no AWS infrastructure
+   README lists the exact settings so anyone can repeat them; no AWS infrastructure
    code is part of this project.
 3. **`restore` service and drill (`drill/`).** The `restore` service in
    Compose, plus `drill/run.sh`, which runs the scenarios end to end on a
@@ -241,9 +241,10 @@ run.
 **Still to do**
 - Set real `ALERT_WEBHOOK_URL` and `HEALTHCHECK_URL_*` and see a success ping and
   a failure alert arrive; then tick the alerting box.
-- `docs/aws-setup.md` and the committed IAM policy JSON; confirm the bucket
-  settings match objective 2.
-- `.github/workflows/checks.yml`.
+- Check that your real bucket's settings match the README "AWS setup" section
+  (versioning, SSE-S3, lifecycle on `drill/` and noncurrent only), then tick
+  the AWS box. The README is written; `checks.yml` is written and passes locally,
+  and needs a first green run on GitHub before its box is ticked.
 - Day 2: `restore` service, `drill/run.sh`, must-have scenarios, reports.
 - Day 3: extra scenarios, 10 GB benchmark, README rewrite.
 
@@ -251,7 +252,7 @@ run.
 
 | Day | Work |
 |---|---|
-| 1 | Harden the kit and add alerting (objective 1). Bucket, IAM policy and user made by hand and written up in `docs/aws-setup.md`. `checks.yml` green. |
+| 1 | Harden the kit and add alerting (objective 1). Bucket, IAM policy and user made by hand and written up in the README. `checks.yml` green. |
 | 2 | `restore` service and `drill/run.sh` with the four must-have scenarios, checks and report. |
 | 3 | Extra scenarios 5–8, 10 GB benchmark and `docs/benchmark.md`. README handover with diagram, runbooks, report and cost. Upwork portfolio entry. |
 
@@ -265,7 +266,7 @@ PostgreSQL 17 · pgBackRest · Amazon S3 · AWS IAM · Docker + Compose · Bash 
 
 - [x] Kit hardened: `ap-southeast-2` default, data checksums, no secrets in cron files, ports on localhost, `restore.sh` asks before wiping, versions pinned.
 - [ ] Backup jobs exit non-zero on failure, log to `docker logs`, alert through a webhook, and ping a dead-man's switch on success.
-- [ ] The S3 bucket (encrypted, private, versioned, lifecycle only on `drill/` and old versions) and the stanza-scoped IAM policy and user exist, and `docs/aws-setup.md` records the exact settings.
+- [ ] The S3 bucket (encrypted, private, versioned, lifecycle only on `drill/` and old versions) and the stanza-scoped IAM policy and user exist, and the README "AWS setup" section records the exact settings.
 - [ ] `checks.yml` runs shellcheck, hadolint, actionlint, and compose config on every PR (green).
 - [ ] The `restore` service restores into an empty directory with `archive_mode=off`, runs the checks and writes a Markdown/JSON report.
 - [ ] Must-have scenarios pass and are reported: latest restore with RPO, PITR before a `DELETE`, `pgbackrest verify` + `pg_amcheck`, failure alert.

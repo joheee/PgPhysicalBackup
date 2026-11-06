@@ -1,0 +1,51 @@
+name: checks
+
+# Lint and validate only. No AWS access and no secrets are needed or used.
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: git ls-files '*.sh' | xargs shellcheck
+
+  hadolint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: hadolint
+        run: |
+          status=0
+          for f in $(git ls-files '*Dockerfile'); do
+            echo "== $f"
+            docker run --rm -i hadolint/hadolint:v2.15.1 < "$f" || status=1
+          done
+          exit "$status"
+
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker compose config
+        run: |
+          docker compose --env-file .env.example config -q
+          docker compose --env-file .env.example --profile pgadmin config -q

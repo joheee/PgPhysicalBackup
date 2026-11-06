@@ -1,135 +1,320 @@
 # pg-physical-backup
 
-Physical PostgreSQL backup and disaster recovery using **pgBackRest → Amazon S3**, orchestrated by Docker Compose. A single PostgreSQL 17 instance streams its WAL to S3 continuously, takes scheduled base backups, and can be rebuilt on a fresh EC2 VM from the latest backup.
+[![checks](https://github.com/joheee/PgPhysicalBackup/actions/workflows/checks.yml/badge.svg)](https://github.com/joheee/PgPhysicalBackup/actions/workflows/checks.yml)
+
+Physical PostgreSQL 17 backups with **pgBackRest → Amazon S3**, run by Docker Compose: continuous WAL archiving, scheduled full and differential backups, client-side AES-256 encryption, alerts when a job fails or stops running, and a script to rebuild a host from the latest backup.
+
+The goal of the project is **backups you can prove restore, with measured numbers**. Part of that is built and tested today; the rest is planned. See [Status](#status).
+
+## Status
+
+| Area | State |
+|---|---|
+| WAL archiving to S3, scheduled full / diff / `check` jobs, encryption | Built. First real full backup and `check` succeeded on S3. |
+| Hardening (region, data checksums, localhost ports, pinned versions, no secrets in cron files, confirmed wipes) | Built and tested. |
+| Failure alerts (non-zero exit, webhook, dead-man's switch) | Built. Tested against a stand-in listener; not yet seen with a real Slack / Healthchecks.io endpoint. |
+| Readable logs (schedule table, countdown, live view) | Built and tested. |
+| CI (`checks.yml`: shellcheck, hadolint, actionlint, compose config) | Built; every step passes locally. |
+| `restore` container and `drill/run.sh` (latest restore with RPO, point-in-time recovery, `verify` + `pg_amcheck`, failure scenario) | **Planned.** |
+| Extra scenarios (named restore point, older backup set, single database, delta restore) | **Planned.** |
+| 10 GB benchmark, sample reports | **Planned.** |
+
+Until the `restore` container exists, the only restore path is `restore.sh` (rebuild this host from the latest backup). Nothing in this README claims a restore time or RPO yet, because none has been measured.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph VM["EC2 VM (running)"]
-        PG[("PostgreSQL 17<br/>pg container")]
-        BACKUP["backup container<br/>cron: full / diff / check"]
-        PG ---|"unix socket"| BACKUP
+    subgraph HOST["Docker host (laptop, VPS or EC2)"]
+        PG[("pg<br/>PostgreSQL 17 + pgBackRest")]
+        BK["pg-cron-backup<br/>cron: full / diff / check<br/>run-job.sh wrapper"]
+        RS["restore container<br/>(planned)"]
+        PG ---|"unix socket + pg-data"| BK
     end
 
-    S3[("Amazon S3<br/>pgBackRest repo<br/>stanza: pg · AES-256-CBC")]
+    S3[("Amazon S3<br/>pgBackRest repo<br/>AES-256-CBC + SSE-S3")]
+    WH["Webhook<br/>(Slack or similar)"]
+    HC["Healthchecks.io<br/>dead-man's switch"]
 
-    PG -->|"archive_command:<br/>archive-push WAL"| S3
-    BACKUP -->|"pgbackrest backup<br/>(full / diff / check)"| S3
-
-    subgraph DR["DR — fresh EC2 VM (after failure)"]
-        R["restore.sh"]
-        PG2[("PostgreSQL 17<br/>new pg")]
-    end
-
-    S3 -->|"restore latest backup<br/>(preserves system-id)"| R
-    R -->|"replays WAL → primary"| PG2
+    PG -->|"archive-push (every WAL segment)"| S3
+    BK -->|"backup / check"| S3
+    BK -->|"on failure"| WH
+    BK -->|"ping on success, /fail on failure"| HC
+    S3 -.->|"restore into empty dir<br/>archive_mode=off"| RS
 ```
-
-## How it works
 
 | Component | Role |
 |---|---|
-| `pg` | PostgreSQL 17 + pgBackRest. Runs `archive_mode=on`; every WAL segment is pushed to S3 via `archive-push`. |
-| `backup` | Debian + cron + pgBackRest. Schedules full / differential backups and health checks against the same stanza. |
-| S3 | pgBackRest repo (bucket), holding the base backups + WAL archives. Client-side AES-256-CBC encrypted. |
-
-**Startup flow (`start.sh`):**
-
-1. Sources `.env`, `sed`-substitutes `configs/*.conf.tmpl` → real `.conf`.
-2. Creates + `chown 999:999` the data/socket/spool directories.
-3. Builds images and starts `pg` (runs `initdb` on first boot).
-4. Waits for PG, then runs `stanza-create` **idempotently** if the stanza doesn't exist yet.
-5. Starts the `backup` scheduler.
-
-**Disaster recovery (`restore.sh`):** on a fresh/replacement EC2 VM, it wipes the local data dir, restores the latest backup from S3, and starts PG — which replays WAL and comes up as the primary.
+| `pg` | PostgreSQL 17 with pgBackRest. `archive_mode=on`, so every WAL segment goes to S3. Data checksums are on. |
+| `pg-cron-backup` | Debian + cron + pgBackRest. Runs the jobs through `run-job.sh` and prints the schedule and countdown. Shares `pg-data` (read-only) and the socket with `pg`. |
+| S3 bucket | The pgBackRest repository: base backups and WAL archive, encrypted client-side and with SSE-S3. |
+| `pgadmin` (optional) | Web UI behind the `pgadmin` Compose profile, localhost only. |
 
 ## Repository layout
 
 ```
 .
-├── docker-compose.yml                 # pg + backup services
-├── start.sh                           # generate configs, build, start pg + backup
-├── restore.sh                         # DR: restore latest backup on a fresh host
-├── .env.example                       # all configuration
-├── pg/
-│   └── Dockerfile                     # postgres:17 + pgBackRest
+├── docker-compose.yml          # project "pgdemo": pg, backup, pgadmin (profile)
+├── start.sh                    # generate configs, build, start pg + backup, create stanza
+├── restore.sh                  # DR: rebuild this host from the latest backup
+├── .env.example                # all configuration (copy to .env, chmod 600)
+├── pg/Dockerfile               # postgres:17.11 (digest-pinned) + pgBackRest 2.60.0
 ├── backup/
-│   ├── Dockerfile                     # cron + pgBackRest
-│   └── entrypoint.sh                  # renders /etc/cron.d/pgbackrest from .env
+│   ├── Dockerfile
+│   ├── entrypoint.sh           # root-only job env file, schedule-only crontab, startup table
+│   ├── run-job.sh              # wraps every job: logs, duration, webhook alert, health ping
+│   ├── status.sh               # next run times
+│   └── countdown.sh            # countdown lines for docker logs, or --live
 ├── configs/
-│   ├── pg-pgbackrest.conf.tmpl        # archive-push / archive-get config
-│   └── backup-pgbackrest.conf.tmpl    # backup config (retention/compression)
+│   ├── pg-pgbackrest.conf.tmpl     # archive-push / archive-get
+│   └── backup-pgbackrest.conf.tmpl # backup, retention, compression
+└── .github/workflows/checks.yml
 ```
 
-## Prerequisites
+`configs/*.conf` and `configs/s3-keys.env` are generated by `start.sh` and git-ignored.
 
-- An S3 bucket for the pgBackRest repo.
-- AWS credentials: an EC2 **IAM instance profile** with S3 access to that bucket (`repo1-s3-key-type=auto`). Alternatively, static keys via `PGBACKREST_AWS_ACCESS_KEY_ID` / `PGBACKREST_AWS_SECRET_ACCESS_KEY`.
-- The same `PGBACKREST_CIPHER_PASS` on every host that touches the repo (generate with `openssl rand -base64 48`).
+## Quick start
 
-## Quick start (fresh deploy)
+You need Docker with Compose, plus an S3 bucket and IAM credentials ([AWS setup](#aws-setup)).
 
 ```bash
-cp .env.example .env        # set PGBACKREST_S3_BUCKET, PGBACKREST_CIPHER_PASS (keep PGBACKREST_STANZA default)
+cp .env.example .env
+chmod 600 .env           # it holds the passphrase and the S3 keys
+$EDITOR .env             # bucket, keys, passphrase, passwords
 ./start.sh
 ```
 
-`start.sh` auto-creates the stanza, so archiving and the backup cron work immediately. If you need to create it manually (or the auto-create didn't run):
+`start.sh` refuses to run while `PGBACKREST_CIPHER_PASS` is still `changeme`. Generate a real one with `openssl rand -base64 48` and keep it safe: **without it the backups cannot be read**.
+
+`start.sh` generates the configs, builds the images, starts `pg`, creates the stanza if it doesn't exist, then starts the backup container. Verify and take the first backup:
 
 ```bash
-docker exec -u postgres pg pgbackrest --stanza=pg stanza-create
+docker exec pg psql -U postgres -c "SHOW data_checksums;"                 # on
+docker exec -u postgres pg pgbackrest --stanza=pg check                   # WAL reaches S3
+docker exec -u postgres pg-cron-backup pgbackrest --stanza=pg --type=full backup
+docker exec -u postgres pg pgbackrest --stanza=pg info                    # backup listed
 ```
 
-Verify:
+`POSTGRES_PASSWORD` and the data checksum setting apply only when `pg-data` is first created. See [Troubleshooting](#troubleshooting) to change a password later.
+
+## AWS setup
+
+Everything runs locally; AWS is used only for S3 and IAM, in `ap-southeast-2`. The bucket and IAM user are created by hand (there is no infrastructure code in this repo). Set `BUCKET` to a globally unique name and run these with admin credentials in your own account.
+
+### 1. Bucket
+
+Required settings: public access blocked, bucket-owner-enforced ownership, SSE-S3, versioning on, and lifecycle rules **only** for old versions, incomplete uploads and the `drill/` prefix. Never add an expiry rule to the live repository path (`pgbackrest/`): pgBackRest owns retention there and expiring files under it breaks the backup chain.
 
 ```bash
-docker exec pg psql -U postgres -c "SELECT pg_is_in_recovery();"   # expect f (primary)
-docker exec -u postgres pg pgbackrest --stanza=pg info             # stanza exists
+BUCKET=my-unique-pgbackrest-bucket
+REGION=ap-southeast-2
+
+aws s3api create-bucket --bucket "$BUCKET" --region "$REGION" \
+  --create-bucket-configuration LocationConstraint="$REGION"
+aws s3api put-public-access-block --bucket "$BUCKET" --public-access-block-configuration \
+  BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+aws s3api put-bucket-ownership-controls --bucket "$BUCKET" \
+  --ownership-controls 'Rules=[{ObjectOwnership=BucketOwnerEnforced}]'
+aws s3api put-bucket-encryption --bucket "$BUCKET" --server-side-encryption-configuration \
+  '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled
+aws s3api put-bucket-tagging --bucket "$BUCKET" \
+  --tagging 'TagSet=[{Key=project,Value=pg-physical-backup},{Key=environment,Value=demo}]'
+aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --lifecycle-configuration file://lifecycle.json
 ```
 
-## Disaster recovery (fresh host)
+`lifecycle.json`:
+
+```json
+{
+  "Rules": [
+    { "ID": "noncurrent-versions", "Status": "Enabled", "Filter": {},
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 7 } },
+    { "ID": "abort-incomplete-multipart-uploads", "Status": "Enabled", "Filter": {},
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 } },
+    { "ID": "expired-delete-markers", "Status": "Enabled", "Filter": {},
+      "Expiration": { "ExpiredObjectDeleteMarker": true } },
+    { "ID": "expire-drill-prefix", "Status": "Enabled", "Filter": { "Prefix": "drill/" },
+      "Expiration": { "Days": 7 } }
+  ]
+}
+```
+
+Versioning plus the 7-day noncurrent rule means a deleted backup file stays recoverable for a week. Optionally also deny non-TLS requests with a bucket policy on `aws:SecureTransport = false`.
+
+### 2. IAM policy and user
+
+pgBackRest needs four S3 actions. This policy grants them on the two prefixes only:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListRepoPrefixes",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::YOUR-BUCKET",
+      "Condition": {
+        "StringLike": { "s3:prefix": ["pgbackrest", "pgbackrest/*", "drill", "drill/*"] }
+      }
+    },
+    {
+      "Sid": "ReadWriteRepoObjects",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": [
+        "arn:aws:s3:::YOUR-BUCKET/pgbackrest/*",
+        "arn:aws:s3:::YOUR-BUCKET/drill/*"
+      ]
+    }
+  ]
+}
+```
+
+It deliberately omits `s3:DeleteObjectVersion`: on a versioned bucket `DeleteObject` only adds a delete marker, so a leaked key cannot permanently destroy backups within the 7-day window. It also grants nothing on the bucket configuration, IAM or EC2. The `s3:prefix` condition on `ListBucket` is the part most likely to need loosening if pgBackRest lists a path the condition doesn't cover; if you see `AccessDenied` on a list call, widen it first.
 
 ```bash
-cp .env.example .env        # SAME PGBACKREST_S3_BUCKET / PGBACKREST_CIPHER_PASS / PGBACKREST_STANZA as source
-./restore.sh
+USER=pg-physical-backup-demo
+aws iam create-user --user-name "$USER" \
+  --tags Key=project,Value=pg-physical-backup Key=environment,Value=demo
+aws iam put-user-policy --user-name "$USER" --policy-name pgbackrest-repo \
+  --policy-document file://iam-policy.json          # the JSON above, with your bucket name
+aws iam create-access-key --user-name "$USER"       # the secret is shown once
 ```
 
-Restores the latest backup (preserving the database **system-identifier**), replays WAL, and starts PG as the primary. Then confirm:
+Put the access key pair only in `.env` (mode 600). Never in the repo, a ticket or a chat. Deactivate it when you aren't running demos:
 
 ```bash
-docker exec pg psql -U postgres -c "SELECT pg_is_in_recovery();"   # expect f
+aws iam update-access-key --user-name "$USER" --access-key-id AKIA... --status Inactive
 ```
 
-## Configuration reference (`.env`)
+### 3. On EC2 instead of a laptop
+
+Attach the same policy to an **instance profile role** and leave `PGBACKREST_AWS_ACCESS_KEY_ID` / `PGBACKREST_AWS_SECRET_ACCESS_KEY` unset. `start.sh` then selects `repo1-s3-key-type=auto` and no keys exist anywhere. Off EC2, `auto` hangs probing the instance metadata endpoint, so use static keys there.
+
+### Cost
+
+S3 storage only, under about $1 a month with the default retention (2 full and 4 differential backups, WAL expired by pgBackRest). There is no always-on compute: the demo runs on your machine. Restores download from S3 and the first 100 GB a month of data out to the internet is free.
+
+## Configuration (`.env`)
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PGBACKREST_STANZA` | `pg` | pgBackRest stanza name (one DB = one stanza) |
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` | `postgres` / `changeme` | PG superuser |
-| `PGBACKREST_S3_BUCKET` | — | pgBackRest repo bucket (required) |
-| `PGBACKREST_AWS_DEFAULT_REGION` | `us-east-1` | S3 region |
-| `PGBACKREST_S3_ENDPOINT` | `s3.us-east-1.amazonaws.com` | S3 endpoint |
-| `PGBACKREST_AWS_ACCESS_KEY_ID` / `PGBACKREST_AWS_SECRET_ACCESS_KEY` | — | Static IAM *user* keys for non-EC2 hosts (VPS). Leave unset on EC2 — `auto` uses the instance profile. |
-| `PGBACKREST_CIPHER_PASS` | `changeme` | AES-256-CBC passphrase (required) |
-| `PGBACKREST_RETENTION_FULL` / `PGBACKREST_RETENTION_DIFF` | `2` / `4` | Backup retention (count) |
-| `PGBACKREST_ARCHIVE_TIMEOUT` | `60` | PG `archive_timeout` (seconds) — forces a WAL switch |
-| `PGBACKREST_BACKUP_FULL_CRON` | `"07 2 * * 0"` | Full backup schedule (Sun 02:07) |
-| `PGBACKREST_BACKUP_DIFF_CRON` | `"07 2 * * 1-6"` | Differential schedule (Mon–Sat 02:07) |
-| `PGBACKREST_BACKUP_CHECK_CRON` | `"17 7 * * *"` | Health check schedule (daily 07:17) |
-| `PGBACKREST_COMPRESS_LEVEL` / `PGBACKREST_COMPRESS_LEVEL_NETWORK` / `PGBACKREST_PROCESS_MAX` | `6` / `3` / `4` | Optional overrides |
+| `PGBACKREST_STANZA` | `pg` | Stanza name (one database = one stanza) |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` | `postgres` / `changeme` | Superuser. The password applies on first init only. |
+| `PGBACKREST_S3_BUCKET` | — | Repo bucket (required) |
+| `PGBACKREST_AWS_DEFAULT_REGION` | `ap-southeast-2` | S3 region |
+| `PGBACKREST_S3_ENDPOINT` | `s3.ap-southeast-2.amazonaws.com` | S3 endpoint |
+| `PGBACKREST_AWS_ACCESS_KEY_ID` / `..._SECRET_ACCESS_KEY` | — | Static IAM user keys (laptop, VPS). Unset on EC2. |
+| `PGBACKREST_CIPHER_PASS` | `changeme` (refused) | AES-256-CBC passphrase. Required, same on every host that touches the repo. |
+| `PGBACKREST_RETENTION_FULL` / `_DIFF` | `2` / `4` | Retention by count |
+| `PGBACKREST_ARCHIVE_TIMEOUT` | `60` | Postgres `archive_timeout` and pgBackRest `archive-timeout` (seconds) |
+| `PGBACKREST_BACKUP_FULL_CRON` | `"07 2 * * 0"` | Full backup, Sunday 02:07 **UTC** |
+| `PGBACKREST_BACKUP_DIFF_CRON` | `"07 2 * * 1-6"` | Differential, Monday to Saturday 02:07 UTC |
+| `PGBACKREST_BACKUP_CHECK_CRON` | `"17 7 * * *"` | `pgbackrest check`, daily 07:17 UTC |
+| `ALERT_WEBHOOK_URL` | unset | Failure alert target (Slack-compatible `{"text": ...}`) |
+| `HEALTHCHECK_URL_FULL` / `_DIFF` / `_CHECK` | unset | One Healthchecks.io check per job |
+| `COUNTDOWN_INTERVAL_SECONDS` | `1` | Seconds between countdown lines in `docker logs`; `0` = off |
+| `PGADMIN_DEFAULT_EMAIL` / `_PASSWORD` | `admin@test.com` / unset | pgAdmin login (profile `pgadmin`) |
+| `PGBACKREST_COMPRESS_LEVEL`, `_COMPRESS_LEVEL_NETWORK`, `_PROCESS_MAX` | `6`, `3`, `4` | Optional tuning |
 
-Cron values contain spaces → keep them **quoted** in `.env` (`start.sh` sources it with `source`).
+Cron values contain spaces, so keep them **quoted** (`start.sh` sources the file). All cron times are UTC.
+
+## Running it
+
+### Logs and countdown
+
+```bash
+docker logs -f pg-cron-backup
+```
+
+At start the container prints the next run of each job, then a countdown line every second, and after every job a result line:
+
+```
+Next scheduled jobs (now: Fri 2026-11-06 19:25 UTC):
+  Differential backup  [06:41:24]  Sat 2026-11-07 02:07 UTC
+  Health check         [11:51:24]  Sat 2026-11-07 07:17 UTC
+  Full backup          [30:41:24]  Sun 2026-11-08 02:07 UTC
+...
+2026-11-06T19:25:39Z [countdown] Differential backup [06:41:21] | Health check [11:51:21] | Full backup [30:41:21]
+2026-11-06T19:58:08Z [check] Health check: finished OK in 0m 5s
+2026-11-06T19:58:08Z [scheduler] next: Differential backup [06:41:19] | ...
+```
+
+Extra commands:
+
+```bash
+docker exec -it pg-cron-backup countdown.sh --live   # one line that redraws in place; stores nothing; Ctrl-C quits
+docker exec pg-cron-backup status.sh                 # next run times
+docker logs pg-cron-backup 2>&1 | grep -v '\[countdown\]'   # job output without the countdown
+```
+
+Docker logs can only append lines, so the in-place redraw lives in `--live`, not in the log pane. Log storage is capped: the `local` driver, `max-size: 37m` (about 3 days at one line per second), `max-file: 2`, rotated files compressed, so disk use peaks near 38 MiB. Docker rotates by size, not time: if you change `COUNTDOWN_INTERVAL_SECONDS`, change `max-size` in proportion (interval `10` → `370m`). The per-file `backup file` lines pgBackRest prints are filtered out of the log.
+
+### Alerts
+
+Every job runs through `backup/run-job.sh`. On failure it exits non-zero, writes the error to `docker logs`, posts the last lines of output to `ALERT_WEBHOOK_URL`, and pings `<healthcheck-url>/fail`. On success it pings the check URL, so a job that silently stops running is caught by the missed ping.
+
+1. Create three checks at [healthchecks.io](https://healthchecks.io) (free tier): one for each job, with periods that match the schedule (daily for `diff` and `check`, weekly for `full`) and a grace time. Put the ping URLs in `HEALTHCHECK_URL_FULL`, `_DIFF`, `_CHECK`.
+2. Create an incoming webhook in Slack (or a Slack-compatible one such as Discord's `/slack` endpoint) and set `ALERT_WEBHOOK_URL`.
+3. `docker compose up -d backup` to pick up the new values.
+
+Both are optional; with neither set, failures appear only in `docker logs`, and the container prints a warning at start. The failure path (non-zero exit, log output, webhook JSON, `/fail` ping) has been tested against a stand-in listener, not against a real Slack or Healthchecks.io endpoint. To try it with your own, run a job with broken credentials:
+
+```bash
+docker exec pg-cron-backup /usr/local/bin/run-job.sh check check     # note the exit code
+```
+
+### Routine commands
+
+```bash
+docker exec -u postgres pg pgbackrest --stanza=pg info          # backups and WAL range
+docker exec -u postgres pg pgbackrest --stanza=pg check         # archive and repo sanity
+docker exec -u postgres pg-cron-backup pgbackrest --stanza=pg --type=full backup
+docker exec pg psql -U postgres -c "SELECT pg_switch_wal();"    # force a WAL segment out
+```
+
+### pgAdmin (optional)
+
+```bash
+docker compose --profile pgadmin up -d pgadmin      # http://localhost:5435
+```
+
+Set `PGADMIN_DEFAULT_PASSWORD` in `.env` first. Register the server with **host `pg`, port `5432`**, user `postgres` and your `POSTGRES_PASSWORD`. Not `localhost`: inside the pgAdmin container that is pgAdmin itself. From tools on your machine use `127.0.0.1:5434`. The `pgadmin-data` directory must be owned by uid 5050.
+
+### Disaster recovery (`restore.sh`)
+
+On a fresh or replacement host, with the same `PGBACKREST_S3_BUCKET`, `PGBACKREST_CIPHER_PASS` and `PGBACKREST_STANZA` as the source in `.env`:
+
+```bash
+./restore.sh          # asks you to type the stanza name before wiping pg-data
+./restore.sh --yes    # no prompt (required when there is no terminal)
+```
+
+It asks first, then stops `pg` and `backup`, wipes `pg-data` from a throwaway root container, restores the latest backup into the empty directory, and starts `pg`, which replays WAL and comes up as the primary. The restore keeps the database's system identifier, so archiving to the same stanza keeps working. Confirm with `SELECT pg_is_in_recovery();` (expect `f`).
+
+## Best practice this kit follows
+
+- **Continuous WAL archiving** with `archive_timeout=60`: a quiet database still ships WAL, so worst-case data loss is about a minute.
+- **Retention owned by pgBackRest.** No S3 lifecycle rules on the live repository path.
+- **Encryption:** client-side `aes-256-cbc` plus SSE-S3.
+- **Data checksums** from `initdb`, so pgBackRest checks every page during a backup.
+- **Secrets stay out of world-readable places.** pgBackRest does not expand `${VAR}` in its config, so the passphrase reaches it as the `PGBACKREST_REPO1_CIPHER_PASS` environment variable and never sits in a `.conf`. Cron jobs read a root-only (mode 600) env file inside the container; `/etc/cron.d` holds schedules only; nothing secret is on a command line or in a log. Static S3 keys live in `.env` (mode 600) and a generated mode-600 `configs/s3-keys.env`.
+- **Localhost-only ports** (`127.0.0.1:5434`, `127.0.0.1:5435`), pgAdmin off by default.
+- **Pinned versions:** images by tag and digest, pgBackRest by package version.
+- **Safe restores:** into an empty directory only, `initdb` never runs first, nothing is wiped without a prompt or `--yes`.
+- **No overlapping jobs:** pgBackRest's stanza lock stops two backups at once; the job logs it and exits non-zero.
 
 ## Core concepts (read before debugging)
 
-**WAL archive ≠ base backup.** A stanza holds two things: WAL segments (from `archive-push`) and base backups (from `pgbackrest backup`). `pgbackrest info` lists *base* backups — a stanza can have WAL yet show "no backups".
+**WAL archive ≠ base backup.** A stanza holds WAL segments (from `archive-push`) and base backups (from `pgbackrest backup`). `pgbackrest info` lists *base* backups, so a stanza can have WAL and still show no backups.
 
-**A stanza is bound to the database's `system_identifier`.** This ID is generated once at `initdb` and never changes — through backups, restores, and promotion. pgBackRest stamps it into the stanza and rejects WAL/backups whose ID doesn't match.
+**A stanza is bound to the database's `system_identifier`.** It is generated once at `initdb` and survives backups, restores and promotion. pgBackRest rejects WAL or backups whose ID doesn't match.
 
-**Restore preserves the system-id; `initdb` does not.** Restoring a backup onto a fresh host reproduces the *same* system-id, so archiving to the same stanza keeps working. But starting PG on an **empty data dir** runs `initdb` → a **new** system-id → `ArchiveMismatchError`. Hence the golden rule: **never let `initdb` run before a restore** — `restore.sh` wipes and restores in the right order.
+**A restore preserves the system ID; `initdb` does not.** Restoring reproduces the same ID, so archiving to the same stanza keeps working. Starting Postgres on an *empty* data directory runs `initdb`, creating a new ID and causing `ArchiveMismatchError`. Hence the golden rule: **never let `initdb` run before a restore.**
 
-**Reconciling a stale stanza.** If a data dir was re-`initdb`'d (or a different DB restored over it), the stanza no longer matches. Fix it by deleting and recreating the stanza:
+**Reconciling a stale stanza.** If a data directory was re-initialised, delete and recreate the stanza (this removes the repository's history for it, so be sure):
 
 ```bash
 docker exec -u postgres pg pgbackrest --stanza=pg stop
@@ -139,36 +324,54 @@ docker exec -u postgres pg pgbackrest --stanza=pg stanza-create
 
 ## Troubleshooting
 
-Cron job output does **not** appear in `docker logs` (Debian cron has no syslog/MTA in the container). The real logs are in pgBackRest's own file:
-
-```bash
-docker exec pg-cron-backup tail -f /var/log/pgbackrest/pgbackrest.log
-```
-
-Common errors:
-
-| Error | Meaning | Fix |
+| Symptom | Meaning | Fix |
 |---|---|---|
-| `FileMissingError … archive.info` / "has a stanza-create been performed?" | Stanza doesn't exist | `stanza-create` (auto in `start.sh`) |
-| `ArchiveMismatchError` / `[028] info files exist but do not match` | Stanza bound to a different DB instance (re-initdb or restored another DB) | `stanza-delete --force` + `stanza-create` |
-| `[040] unable to restore … contains files` | Restore target is not empty | Wipe the data dir first (`restore.sh` does this) |
-| `[055] stop file does not exist` | `stanza-delete` requires a prior `stop` | Run `pgbackrest … stop` first |
-| `[038] postmaster.pid exists` | PG is running during `stanza-delete` | Add `--force` |
-| `[037] archive-get requires pg1-path` / "does this stanza exist?" | `restore_command` can't resolve the stanza (missing/broken) | Reconcile the stanza |
+| `[055] FileMissingError … archive.info`, "has a stanza-create been performed?" | The stanza doesn't exist yet | `stanza-create` (`start.sh` does it) |
+| `ERROR: [032] environment variable 'repo1-s3-key' must have a value` | An S3 key variable is set but empty | Leave both keys unset (EC2) or set both. `start.sh` writes `configs/s3-keys.env` only when both are set. |
+| `check` or a job hangs for a long time | `repo1-s3-key-type=auto` on a host with no EC2 metadata | Set the static IAM user keys |
+| `AccessDenied` from S3 | IAM policy or wrong bucket / region | Check bucket name, region, and the `s3:prefix` condition |
+| pgAdmin can't log in to Postgres: `password authentication failed` | `POSTGRES_PASSWORD` in `.env` differs from the one the cluster was created with | Reset the role's password, see below the table |
+| `localhost:5435` doesn't answer, logs say `Permission denied: /var/lib/pgadmin/sessions` | `pgadmin-data` is owned by root | Give it to uid 5050, see below the table |
+| `ArchiveMismatchError` / `[028] info files exist but do not match` | Stanza bound to a different database instance | `stanza-delete --force` + `stanza-create` |
+| `[040] unable to restore … contains files` | Restore target is not empty | Wipe the data directory first (`restore.sh` does) |
+| `[055] stop file does not exist` | `stanza-delete` needs `stop` first | Run `pgbackrest … stop` first |
+| `[038] postmaster.pid exists` | Postgres is running during `stanza-delete` | Add `--force` |
+| `invalid option 'backup-full-cron'` warnings | The schedule variables are visible to a manual `docker exec` | Harmless; the cron jobs don't see them |
+| Edited `.env` but nothing changed | Containers keep the environment they started with | `./start.sh` or `docker compose up -d` |
 
-## Useful commands
+Reset the Postgres password to the value in `.env` (the value is read inside the container, so it never appears on a command line):
 
 ```bash
-# Stanza + backup state
-docker exec -u postgres pg pgbackrest --stanza=pg info
-docker exec -u postgres pg pgbackrest --stanza=pg check
-
-# Force an immediate WAL archive (diagnostics)
-docker exec pg psql -U postgres -c "SELECT pg_switch_wal();"
-
-# Run a manual full backup
-docker exec -u postgres pg-cron-backup pgbackrest --stanza=pg --type=full backup --log-level-console=info
-
-# Point-in-time restore (on a fresh host, before starting PG)
-docker exec -u postgres pg pgbackrest --stanza=pg --type=time="2026-08-19 05:00:00" restore
+printf '%s\n' '\set pw `printenv POSTGRES_PASSWORD`' "ALTER USER postgres PASSWORD :'pw';" \
+  | docker exec -i pg sh -c 'psql -U "$POSTGRES_USER" -d postgres'
 ```
+
+Fix the `pgadmin-data` owner, then restart pgAdmin:
+
+```bash
+docker compose --profile pgadmin stop pgadmin
+docker run --rm -v "$PWD/pgadmin-data:/d" --entrypoint sh pgdemo-pg -c 'chown 5050:5050 /d'
+docker compose --profile pgadmin up -d pgadmin
+```
+
+## Checks (CI)
+
+`.github/workflows/checks.yml` runs on every pull request and push to `master`, with no AWS access and no secrets: `shellcheck` on every `*.sh`, `hadolint` on every `Dockerfile`, `actionlint` on the workflows, and `docker compose config` (also with the `pgadmin` profile). To run the same steps locally:
+
+```bash
+git ls-files '*.sh' | xargs shellcheck
+for f in $(git ls-files '*Dockerfile'); do docker run --rm -i hadolint/hadolint:v2.15.1 < "$f"; done
+docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12
+docker compose --env-file .env.example config -q
+```
+
+## Roadmap
+
+Planned, in order (see `GOALS.md` for the full definition of done):
+
+1. **`restore` container + `drill/run.sh`.** A throwaway Compose-profile container that restores into an empty directory with `archive_mode=off`, runs the checks and writes a Markdown and JSON report. The drill runs on its own stanza under `drill/<run-id>/` with a random passphrase and never touches the real stanza.
+2. **Must-have scenarios:** latest restore after a crash (`docker kill pg`) with measured restore time and RPO; point-in-time recovery before a `DELETE`; `pgbackrest verify` + `pg_amcheck`; a caught failure (broken credentials, stopped archiving).
+3. **Extras:** named restore point, older backup set, single database, delta restore.
+4. **Measured at ~10 GB:** backup time, compressed size, restore time and WAL replay time, with sample reports saved under `docs/reports/`.
+
+Stretch: a weekly GitHub Actions drill against S3 over OIDC, and a monthly restore test on the client's server.
