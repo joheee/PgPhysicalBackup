@@ -11,14 +11,23 @@ services:
     container_name: pg
     hostname: pg
     ports:
-      - "5432:5432"
+      # Localhost only. Put a reverse proxy or SSH tunnel in front for remote access.
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
-      PGBACKREST_CIPHER_PASS: ${PGBACKREST_CIPHER_PASS:-changeme}
-      AWS_DEFAULT_REGION: ${PGBACKREST_AWS_DEFAULT_REGION:-us-east-1}
-      AWS_ACCESS_KEY_ID: ${PGBACKREST_AWS_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY: ${PGBACKREST_AWS_SECRET_ACCESS_KEY:-}
+      # Data checksums let pgBackRest verify every page during backup.
+      # Only applies when initdb runs, i.e. a new pg-data.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+      # pgBackRest does not expand ${VAR} in its config, so the passphrase comes in
+      # as a PGBACKREST_REPO1_* option.
+      PGBACKREST_REPO1_CIPHER_PASS: ${PGBACKREST_CIPHER_PASS:?set PGBACKREST_CIPHER_PASS in .env}
+    # S3 keys (PGBACKREST_REPO1_S3_KEY / _SECRET) are written by start.sh to a
+    # mode-600 file only when static keys are set. pgBackRest rejects empty values,
+    # so on EC2 (instance profile) the file is absent and the variables stay unset.
+    env_file:
+      - path: ./configs/s3-keys.env
+        required: false
     command: >
       postgres
       -c archive_mode=on
@@ -46,13 +55,18 @@ services:
     container_name: pg-cron-backup
     environment:
       PGBACKREST_STANZA: ${PGBACKREST_STANZA:-pg}
-      PGBACKREST_CIPHER_PASS: ${PGBACKREST_CIPHER_PASS:-changeme}
-      AWS_DEFAULT_REGION: ${PGBACKREST_AWS_DEFAULT_REGION:-us-east-1}
-      AWS_ACCESS_KEY_ID: ${PGBACKREST_AWS_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY: ${PGBACKREST_AWS_SECRET_ACCESS_KEY:-}
+      PGBACKREST_REPO1_CIPHER_PASS: ${PGBACKREST_CIPHER_PASS:?set PGBACKREST_CIPHER_PASS in .env}
       PGBACKREST_BACKUP_FULL_CRON: ${PGBACKREST_BACKUP_FULL_CRON:-}
       PGBACKREST_BACKUP_DIFF_CRON: ${PGBACKREST_BACKUP_DIFF_CRON:-}
       PGBACKREST_BACKUP_CHECK_CRON: ${PGBACKREST_BACKUP_CHECK_CRON:-}
+      # Alerting (all optional): webhook on failure, dead-man's switch ping on success.
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      HEALTHCHECK_URL_FULL: ${HEALTHCHECK_URL_FULL:-}
+      HEALTHCHECK_URL_DIFF: ${HEALTHCHECK_URL_DIFF:-}
+      HEALTHCHECK_URL_CHECK: ${HEALTHCHECK_URL_CHECK:-}
+    env_file:
+      - path: ./configs/s3-keys.env
+        required: false
     volumes:
       - ./pg-data:/var/lib/postgresql/data:ro
       - ./pg-socket:/var/run/postgresql
@@ -60,14 +74,17 @@ services:
     restart: unless-stopped
 
   # ── pgAdmin (web UI, optional) ──────────────────────────
+  # Off by default. Start with: docker compose --profile pgadmin up -d pgadmin
   pgadmin:
-    image: dpage/pgadmin4:latest
+    profiles: ["pgadmin"]
+    image: dpage/pgadmin4:9.9
     container_name: pgadmin
     ports:
-      - "5435:80"
+      - "127.0.0.1:5435:80"
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@test.com}
-      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-changeme}
+      # No default: pgAdmin refuses to start until you set one in .env.
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-}
     volumes:
       - ./pgadmin-data:/var/lib/pgadmin
     restart: unless-stopped

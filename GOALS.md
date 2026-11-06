@@ -11,8 +11,8 @@ scheduled full and differential backups from a cron container, client-side
 AES-256 encryption, and `restore.sh` to rebuild a host from the latest backup.
 That is the first half. This project adds the half clients actually pay for:
 a restore container that tests every common recovery case, checks and a
-report with measured numbers, alerts when a backup fails, and the AWS side in
-Terraform.
+report with measured numbers, alerts when a backup fails, and a documented,
+least-privilege S3 and IAM setup.
 
 ## The pitch (what a client buys)
 
@@ -129,16 +129,17 @@ run.
    and the pgBackRest package version pinned. Cron job output in
    `docker logs`, non-zero exits, webhook alert on failure and a dead-man's
    switch ping on success (URLs in `.env`, optional).
-2. **AWS side in Terraform (`terraform/`).** One S3 bucket for the pgBackRest
-   repo: public access blocked, bucket-owner-enforced ownership, SSE-S3,
-   versioning with noncurrent versions expired after 7 days (a deleted backup
-   can be recovered for a week), abort incomplete multipart uploads, and an
-   expiry rule on the `drill/` prefix only. An IAM policy scoped to one
-   stanza prefix, attached to an IAM user for the local demo (its access key
-   is created by hand so the secret never lands in Terraform state, kept only
-   in the mode-600 `.env`, and deactivated after demos) and usable as an EC2
-   instance profile policy for a real host. S3 backend with
-   `use_lockfile = true`, state bucket made by hand, applied locally.
+2. **AWS side, set up by hand and documented (`docs/aws-setup.md`).** One S3
+   bucket for the pgBackRest repo, made in the console or CLI with: public
+   access blocked, bucket-owner-enforced ownership, SSE-S3, versioning with
+   noncurrent versions expired after 7 days (a deleted backup can be recovered
+   for a week), abort incomplete multipart uploads, and an expiry rule on the
+   `drill/` prefix only. An IAM policy scoped to one stanza prefix (the JSON is
+   committed in `docs/`), attached to an IAM user for the local demo (its
+   access key is kept only in the mode-600 `.env`, and deactivated after
+   demos) and usable as an EC2 instance profile policy for a real host. The
+   doc lists the exact settings so anyone can repeat them; no AWS infrastructure
+   code is part of this project.
 3. **`restore` service and drill (`drill/`).** The `restore` service in
    Compose, plus `drill/run.sh`, which runs the scenarios end to end on a
    throwaway stanza under `drill/<run-id>/` with a random cipher passphrase
@@ -150,24 +151,24 @@ run.
    and Postgres versions, machine size. Exits non-zero if any check fails.
    Sample reports saved in `docs/reports/`.
 5. **Checks in CI (`checks.yml`).** `shellcheck`, `hadolint`, `actionlint`,
-   `docker compose config`, and `terraform fmt -check`, `validate`, `tflint`
-   on every pull request and push. No AWS access needed.
+   and `docker compose config` on every pull request and push. No AWS access needed.
 6. **Measured restore time at 10 GB.** One recorded local run with pgbench at
    about scale 680 (≈10 GB): backup time, compressed size in S3, restore time
    and WAL replay time, with the machine and upload/download speed noted.
    Results table in `docs/benchmark.md`.
 7. **Client-style README.** Architecture diagram, quick start, the best
    practice list, a runbook per scenario (exact commands), a real report and a
-   short terminal log pasted in, the benchmark table, alerting setup, the
-   outputs table, monthly cost, and "how to use this on your own database"
-   (EC2 instance profile or VPS with a scoped IAM user).
+   short terminal log pasted in, the benchmark table, alerting setup,
+   monthly cost, and "how to use this on your own database"
+   (EC2 instance profile or VPS with a scoped IAM user), and the AWS setup
+   steps.
 
 ## Stretch
 
 - **Weekly public drill in GitHub Actions (`restore-drill.yml`).** Runs the
   same `drill/run.sh` on a GitHub runner, weekly and on manual dispatch,
-  against S3 through an OIDC role (existing account OIDC provider, looked up
-  with a data source) trusted only for this repo's `master` branch and
+  against S3 through an OIDC role (the existing account OIDC provider, role made
+  by hand) trusted only for this repo's `master` branch and
   scoped to `drill/*`. Report in the job summary; a failed run opens an issue.
   Gives a public green run to link. MinIO in PR CI is not planned.
 - `restore` as a scheduled cron entry in the client's server (monthly restore
@@ -207,26 +208,25 @@ run.
 
 | Day | Work |
 |---|---|
-| 1 | Harden the kit and add alerting (objective 1). `terraform/` bucket, policy and IAM user, applied. `checks.yml` green. |
+| 1 | Harden the kit and add alerting (objective 1). Bucket, IAM policy and user made by hand and written up in `docs/aws-setup.md`. `checks.yml` green. |
 | 2 | `restore` service and `drill/run.sh` with the four must-have scenarios, checks and report. |
 | 3 | Extra scenarios 5–8, 10 GB benchmark and `docs/benchmark.md`. README handover with diagram, runbooks, report and cost. Upwork portfolio entry. |
 
 ## Tools and software
 
-PostgreSQL 17 · pgBackRest · Amazon S3 · AWS IAM · Terraform (>= 1.10) with
-the AWS provider 6.x · Docker + Compose · Bash · pgbench · amcheck
+PostgreSQL 17 · pgBackRest · Amazon S3 · AWS IAM · Docker + Compose · Bash · pgbench · amcheck
 (`pg_amcheck`) · Healthchecks.io (dead-man's switch) · GitHub Actions
-(checks) · shellcheck · hadolint · actionlint · tflint · Mermaid
+(checks) · shellcheck · hadolint · actionlint · Mermaid
 
 ## Definition of done
 
-- [ ] Kit hardened: `ap-southeast-2` default, data checksums, no secrets in cron files, ports on localhost, `restore.sh` asks before wiping, versions pinned.
+- [x] Kit hardened: `ap-southeast-2` default, data checksums, no secrets in cron files, ports on localhost, `restore.sh` asks before wiping, versions pinned.
 - [ ] Backup jobs exit non-zero on failure, log to `docker logs`, alert through a webhook, and ping a dead-man's switch on success.
-- [ ] `terraform/` creates the bucket (encrypted, private, versioned, lifecycle only on `drill/` and old versions) and the stanza-scoped IAM policy and user.
-- [ ] `checks.yml` runs shellcheck, hadolint, actionlint, compose config, fmt, validate and tflint on every PR (green).
+- [ ] The S3 bucket (encrypted, private, versioned, lifecycle only on `drill/` and old versions) and the stanza-scoped IAM policy and user exist, and `docs/aws-setup.md` records the exact settings.
+- [ ] `checks.yml` runs shellcheck, hadolint, actionlint, and compose config on every PR (green).
 - [ ] The `restore` service restores into an empty directory with `archive_mode=off`, runs the checks and writes a Markdown/JSON report.
 - [ ] Must-have scenarios pass and are reported: latest restore with RPO, PITR before a `DELETE`, `pgbackrest verify` + `pg_amcheck`, failure alert.
 - [ ] Extra scenarios pass and are reported: named restore point, older set, single database, delta restore.
 - [ ] `docs/benchmark.md` has measured backup and restore times for a ~10 GB database.
 - [ ] No AWS keys or cipher passphrases in the repo or in GitHub.
-- [ ] README has the diagram, best practice list, a runbook per scenario, a real report, benchmark, outputs table and monthly cost.
+- [ ] README has the diagram, best practice list, a runbook per scenario, a real report, benchmark, monthly cost and the AWS setup steps.
