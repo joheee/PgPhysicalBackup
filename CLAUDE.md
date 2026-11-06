@@ -7,15 +7,21 @@ the "backups you can prove restore, with measured numbers" story clearer.
 ## Context
 
 - This repo (joheee/PgPhysicalBackup) is portfolio project #3: physical
-  PostgreSQL 17 backups with pgBackRest to Amazon S3, plus an automated
-  restore drill (latest and point-in-time) that reports pass/fail, restore
-  time and RPO.
+  PostgreSQL 17 backups with pgBackRest to Amazon S3, plus a throwaway
+  `restore` container that runs the restore scenarios in GOALS.md (latest,
+  point-in-time, integrity, failure alerting, extras) and reports pass/fail,
+  restore time and RPO. The demo runs locally with Docker Compose.
 - The Compose kit (`pg`, `backup` cron container, `start.sh`, `restore.sh`,
   `configs/*.conf.tmpl`) already works. Change it carefully and keep
   `start.sh` and `restore.sh` working the way the README describes.
-- The restore drill is self-contained: it builds its own source database in
-  each run. Don't make anything depend on a long-running server, DigitalOcean
-  (paused) or project 4's EC2.
+- Three services: `pg` (Postgres with pgBackRest inside, archives WAL),
+  `backup` (cron, shares `pg-data` and the socket) and `restore` (Compose
+  profile, run on demand, exits when done). There is no always-on second
+  database.
+- The drill (`drill/run.sh`) is self-contained: it seeds its own data on a
+  throwaway stanza under `drill/<run-id>/` and never touches the real stanza.
+  Don't make anything depend on a long-running server, DigitalOcean (paused)
+  or project 4's EC2.
 - Reuse the Terraform and OIDC patterns from joheee/TicTacToeInfra and
   joheee/AwsEcsFoundationTerraform. The GitHub OIDC provider already exists
   in the account; look it up with a data source, don't create it.
@@ -25,21 +31,26 @@ the "backups you can prove restore, with measured numbers" story clearer.
 ## Layout
 
 - Repo root: the Compose kit (`docker-compose.yml`, `start.sh`, `restore.sh`,
-  `.env.example`, `pg/`, `backup/`, `configs/`).
-- `terraform/`: S3 bucket for the pgBackRest repo, GitHub OIDC drill role,
-  host IAM policy, outputs. S3 backend with `use_lockfile = true` (state
+  `.env.example`, `pg/`, `backup/`, `restore/`, `configs/`).
+- `terraform/`: S3 bucket for the pgBackRest repo, stanza-scoped IAM policy,
+  IAM user for the local demo (access key made by hand, never in state),
+  outputs. The GitHub OIDC drill role is a stretch goal. S3 backend with `use_lockfile = true` (state
   bucket made by hand, `backend.hcl.example` committed). Applied locally.
-- `drill/`: the restore drill script, sample schema and canary SQL, checks
-  and report template. Runs the same locally and in CI.
-- `docs/`: `benchmark.md`, sample reports, runbooks if the README gets long.
-- `.github/workflows/`: `checks.yml` (lint and validate) and
-  `restore-drill.yml` (PRs against MinIO, weekly and manual against S3).
+- `drill/`: `run.sh` (all scenarios, or one with `--scenario`), sample
+  schema and canary SQL, checks and report template.
+- `docs/`: `benchmark.md`, `reports/` (sample reports), runbooks if the
+  README gets long.
+- `.github/workflows/`: `checks.yml` (lint and validate, no AWS). Optional
+  stretch: `restore-drill.yml` (weekly and manual against S3 through OIDC).
+  No MinIO.
 
 ## Working rules
 
 - Never commit secrets, `.env`, `*.tfstate`, `.terraform/`, generated
   `configs/*.conf`, `pg-data/` or real tfvars. Commit `*.example` files.
-- No AWS access keys in GitHub: CI uses OIDC. The drill uses a random cipher
+- No AWS access keys in the repo or GitHub. Locally, the scoped IAM user's
+  key lives only in the git-ignored mode-600 `.env`; on EC2 use an instance
+  profile; CI (if added) uses OIDC. The drill uses a random cipher
   passphrase per run. A real stanza's passphrase never enters the repo or
   Actions logs; mask anything sensitive with `::add-mask::`.
 - Don't write secrets into world-readable files or command lines (cron
@@ -53,7 +64,13 @@ the "backups you can prove restore, with measured numbers" story clearer.
 - Pin Terraform (>= 1.10) and provider versions in `versions.tf`; commit
   `.terraform.lock.hcl`. Pin image tags and the pgBackRest package version.
 - Restore targets must be empty: never let `initdb` run before a restore,
-  and never wipe a data directory without a confirmation or `--yes`.
+  and never wipe a data directory without a confirmation or `--yes`. A
+  restored copy runs with `archive_mode=off` so it can't write into the
+  source stanza; PITR uses `--target-action=promote`.
+- Never put S3 lifecycle rules on live stanza paths; pgBackRest retention
+  owns them. Lifecycle rules only cover `drill/` and noncurrent versions.
+- Backup jobs fail loudly: non-zero exit, output in `docker logs`, webhook
+  alert, dead-man's switch ping on success.
 - Cost: flag anything that adds standing cost. Drill objects expire through
   the lifecycle rule; the 10 GB benchmark runs once, by hand.
 - Run `shellcheck`, `hadolint`, `actionlint`, `docker compose config`,

@@ -2,100 +2,179 @@
 
 This repo (joheee/PgPhysicalBackup) is portfolio project #3 for my Upwork
 DevOps profile. The point is the **proof**: a client should look at it and
-think "this person doesn't just set up backups, they show me every week that
-the backup actually restores, how long it takes and how much data I'd lose".
+think "this person doesn't just set up backups, they show me the backup
+actually restores, how long it takes and how much data I'd lose".
 
 It starts from what this repo already has (built Aug–Sep 2026): PostgreSQL 17
 and pgBackRest in Docker Compose, WAL archived continuously to Amazon S3,
 scheduled full and differential backups from a cron container, client-side
 AES-256 encryption, and `restore.sh` to rebuild a host from the latest backup.
 That is the first half. This project adds the half clients actually pay for:
-an automated restore drill with checks and a report, the AWS side in
-Terraform, CI, and measured numbers.
+a restore container that tests every common recovery case, checks and a
+report with measured numbers, alerts when a backup fails, and the AWS side in
+Terraform.
 
 ## The pitch (what a client buys)
 
-> "PostgreSQL backups with a weekly restore test, 2–3 days." Physical backups
-> and point-in-time recovery with pgBackRest to S3 (encrypted, with
-> retention), plus a scheduled GitHub Actions job that restores the latest
-> backup into a throwaway container, runs integrity and row-count checks,
-> recovers to a point in time before a simulated mistake, and posts a
-> pass/fail report with restore time and data-loss window (RPO). You get the
-> runbook and the measured restore time for your database size.
+> "PostgreSQL backups with a tested restore, 2–3 days." Physical backups and
+> point-in-time recovery with pgBackRest to S3 (encrypted, with retention),
+> alerts when a backup fails or doesn't run, and a restore container that
+> rebuilds the database from S3, checks it and reports the restore time and
+> the data-loss window (RPO). You get the runbooks for each recovery case and
+> the measured restore time for your database size.
 
 It matches jobs like "Postgres freezes + backups" ($5,000), "Medusa backups
 with restore demo", "AWS backup and delete" and "Laravel VPS launch with
 restore test".
 
-## Where the database runs
+## How it runs
 
-The kit runs on any Linux host with Docker (EC2, a VPS, a laptop). The proof
-must not depend on a server staying up, because DigitalOcean (project 2) is
-paused and project 4's EC2 costs money while running. So the **restore drill
-is self-contained**: each run starts a source database in CI, loads sample
-data, backs it up to S3, makes changes, then restores and checks. Nothing runs
-between drills; S3 storage is the only standing cost.
+The demo runs on my laptop with Docker Compose. S3 and IAM are the only parts
+in AWS, so nothing costs money between demos except S3 storage. The same
+Compose kit runs unchanged on a client's EC2 instance or VPS.
 
-Pointing the kit at the tic-tac-toe app's database (joheee/TicTacToeCICD) is a
-stretch goal, done in that repo, not a requirement here.
+Three services:
+
+| Service | What it does |
+|---|---|
+| `pg` | The main PostgreSQL 17, with pgBackRest installed. Postgres itself pushes every WAL segment to S3 (`archive_command = pgbackrest archive-push`), which is what makes point-in-time recovery possible. |
+| `backup` | The cron container. Shares `pg-data` and the socket with `pg` (pgBackRest has to read the data directory). Runs the full, differential and `check` jobs, and alerts on failure. |
+| `restore` | A throwaway container, started only on demand (`docker compose run --rm restore`, Compose profile so `up` doesn't start it). It restores from S3 into an **empty** data directory, starts Postgres with `archive_mode=off`, waits for recovery to finish, runs the checks, writes a report and exits. |
+
+Why a single throwaway `restore` container instead of an always-on "backup
+database": a restore needs an empty data directory and Postgres stopped, so a
+standing second database would fight the restore. And the restored copy must
+never archive into the main stanza, or its WAL gets mixed into the main
+database's archive. `archive_mode=off` stops that.
+
+`restore.sh` stays as the "rebuild this host" disaster recovery script. The
+`restore` service is the "prove it, without touching the main database" path.
+
+## Best practice this kit follows
+
+- **Continuous WAL archiving** to S3 with `archive_timeout=60`, so a quiet
+  database still ships WAL and the worst-case data loss is about a minute.
+- **Schedule:** full backup every Sunday, differential every other night,
+  `pgbackrest check` daily. `repo1-retention-full=2` (count), so pgBackRest
+  removes old backups and the WAL they need by itself.
+- **No S3 lifecycle rules on live stanza paths.** pgBackRest owns retention
+  there; expiring objects underneath it breaks the backup chain. Lifecycle
+  rules only touch the `drill/` prefix and old object versions.
+- **Encryption:** client-side `aes-256-cbc` plus SSE-S3 on the bucket.
+- **Data checksums** on at `initdb` (`--data-checksums`), so pgBackRest checks
+  every page during backup.
+- **Secrets out of world-readable files:** the cipher passphrase and any keys
+  live in a mode-600 env file that the cron jobs read, never in
+  `/etc/cron.d`, a command line or a log. On EC2, use an instance profile
+  (`repo1-s3-key-type=auto`) and no keys at all.
+- **No overlapping jobs:** pgBackRest's stanza lock stops two backups running
+  at once; a job that finds the lock held logs it and exits non-zero.
+- **Failures are loud:** every job exits non-zero on failure, its output shows
+  in `docker logs`, and it posts to a webhook (Slack or similar). Each
+  successful backup pings a dead-man's switch (Healthchecks.io free tier), so
+  a backup that silently stops running also raises an alert.
+- **Restore safety:** restores go into an empty data directory, `initdb` never
+  runs before a restore, nothing wipes data without a prompt or `--yes`,
+  PITR uses `--target-action=promote`, and the restored copy runs with
+  `archive_mode=off`.
+- **A backup counts only once it has restored.** The scenarios below are run
+  and reported, not just documented.
+
+## Restore scenarios
+
+Each scenario is one `restore` run plus checks, and each records restore
+time, WAL replay time, RPO where it applies, and pass or fail.
+
+**Must-have**
+
+1. **Latest restore (server lost).** `docker kill pg` (a crash, not a clean
+   shutdown), restore the latest backup plus all archived WAL. Check
+   `pg_is_in_recovery() = false`, row counts against what the source recorded,
+   and measure RPO from the newest `canary` row.
+2. **Point-in-time recovery (human mistake).** Record time T, run
+   `DELETE FROM orders`, restore with `--type=time --target="<T> +00"
+   --target-action=promote`. The deleted rows are back.
+3. **Integrity checks.** `pgbackrest verify` on the repository, and
+   `pg_amcheck --all` (amcheck) on the restored database's indexes and tables.
+   Shows the backups aren't silently corrupt.
+4. **Failure is caught.** Break the S3 credentials (and, separately, stop
+   archiving). The backup or `check` job exits non-zero, the webhook alert
+   fires, and the dead-man's switch alerts when the next ping doesn't arrive.
+
+**Extras** (cheap, and good for Upwork)
+
+5. **Named restore point (before a risky migration).**
+   `SELECT pg_create_restore_point('pre_migration')`, apply a bad migration,
+   restore with `--type=name --target=pre_migration`.
+6. **Older backup set (corruption noticed days later).** `--set=<label>` from
+   `pgbackrest info` to restore last week's full backup.
+7. **Single database.** `--db-include=appdb` when one database is damaged and
+   the others must stay as they are. (The other databases come back as empty
+   placeholders and have to be dropped; the runbook says so.)
+8. **Delta restore (fast repair).** `--delta` onto an existing but damaged
+   data directory, which only fetches changed files. Timed against a full
+   restore of the same backup.
+
+Sample data for every scenario: pgbench tables, a small `orders` table and a
+`canary` table that gets a timestamped row every few seconds while backups
+run.
 
 ## Objectives
 
 1. **Harden the existing kit.** Default region `ap-southeast-2`. Data
-   checksums on at `initdb` (`--data-checksums`) so pgBackRest verifies pages
-   during backup. Stop writing the cipher passphrase and AWS keys into the
-   world-readable `/etc/cron.d` file (use an env file with mode 600 that the
-   cron jobs read). Bind Postgres and pgAdmin to `127.0.0.1` and pin the
-   pgAdmin image (or drop pgAdmin). Make `archive-timeout` follow `.env`.
-   Make `restore.sh` ask before it wipes `pg-data` (`--yes` to skip). Pin the
-   pgBackRest package version. Backup cron failures exit non-zero and are
-   visible in `docker logs`.
+   checksums at `initdb`. Secrets moved from `/etc/cron.d` into a mode-600 env
+   file. Postgres bound to `127.0.0.1`; pgAdmin dropped or moved behind a
+   Compose profile with a pinned image. `archive-timeout` follows `.env`.
+   `restore.sh` asks before it wipes `pg-data` (`--yes` to skip). Image tags
+   and the pgBackRest package version pinned. Cron job output in
+   `docker logs`, non-zero exits, webhook alert on failure and a dead-man's
+   switch ping on success (URLs in `.env`, optional).
 2. **AWS side in Terraform (`terraform/`).** One S3 bucket for the pgBackRest
-   repo: public access blocked, SSE-S3, versioning with noncurrent versions
-   expired after 7 days (a deleted backup can be recovered for a week),
-   abort incomplete uploads, and a short expiry on the `drill/` prefix.
-   An IAM role for GitHub Actions through OIDC (existing account OIDC
-   provider, looked up with a data source), trusted only for this repo's
-   `master` branch, with read/write on `drill/*` only. An IAM policy for a
-   real host (EC2 instance profile) scoped to that host's stanza prefix.
-   S3 backend with `use_lockfile = true`, state bucket made by hand, applied
-   locally.
-3. **Restore drill script (`drill/`).** One script, run the same way locally
-   and in CI:
-   - Start a source Postgres from this repo's image with a sample schema
-     (pgbench tables plus a small `orders`-style table) and a `canary` table
-     that gets a timestamped row every few seconds.
-   - Create a fresh stanza under `drill/<run-id>/` with a random per-run
-     cipher passphrase, take a full backup, keep writing, take a
-     differential, then record a timestamp T and run a "mistake"
-     (`DELETE FROM orders`).
-   - **Latest restore:** restore into a new, empty container, wait for WAL
-     replay, promote, then check: `pg_is_in_recovery() = false`, `amcheck` on
-     indexes, row counts equal the counts the source recorded after its last
-     archived WAL switch, and the newest canary row gives the RPO.
-   - **Point-in-time restore:** restore again with `--type=time` to T and
-     check the deleted rows are back.
-   - Time every step and write a Markdown and JSON report (backup size, backup
-     time, restore time, WAL replay time, RPO, each check pass/fail). Exit
-     non-zero if any check fails.
-4. **Drill in GitHub Actions (`restore-drill.yml`).** On every pull request
-   the drill runs against MinIO in the job (no AWS, no secrets). Weekly on a
-   schedule and on manual dispatch it runs against the real S3 bucket through
-   OIDC. The report goes to the job summary and as an artifact. A failed
-   scheduled drill opens (or comments on) a GitHub issue, so the failure
-   reaches email; a Slack webhook is optional through a secret.
+   repo: public access blocked, bucket-owner-enforced ownership, SSE-S3,
+   versioning with noncurrent versions expired after 7 days (a deleted backup
+   can be recovered for a week), abort incomplete multipart uploads, and an
+   expiry rule on the `drill/` prefix only. An IAM policy scoped to one
+   stanza prefix, attached to an IAM user for the local demo (its access key
+   is created by hand so the secret never lands in Terraform state, kept only
+   in the mode-600 `.env`, and deactivated after demos) and usable as an EC2
+   instance profile policy for a real host. S3 backend with
+   `use_lockfile = true`, state bucket made by hand, applied locally.
+3. **`restore` service and drill (`drill/`).** The `restore` service in
+   Compose, plus `drill/run.sh`, which runs the scenarios end to end on a
+   throwaway stanza under `drill/<run-id>/` with a random cipher passphrase
+   (seed data, full backup, keep writing, differential, mistake, restores,
+   checks), so a demo never touches the real stanza. `drill/run.sh
+   --scenario <name>` runs one scenario; no argument runs the must-haves.
+4. **Report.** Each run writes a Markdown and JSON report: backup size and
+   time, restore time, WAL replay time, RPO, each check pass/fail, pgBackRest
+   and Postgres versions, machine size. Exits non-zero if any check fails.
+   Sample reports saved in `docs/reports/`.
 5. **Checks in CI (`checks.yml`).** `shellcheck`, `hadolint`, `actionlint`,
    `docker compose config`, and `terraform fmt -check`, `validate`, `tflint`
-   on every pull request and push.
-6. **Measured restore time at 10 GB.** One recorded run with pgbench at
+   on every pull request and push. No AWS access needed.
+6. **Measured restore time at 10 GB.** One recorded local run with pgbench at
    about scale 680 (≈10 GB): backup time, compressed size in S3, restore time
-   and WAL replay time, with the machine size noted (GitHub runner or local).
+   and WAL replay time, with the machine and upload/download speed noted.
    Results table in `docs/benchmark.md`.
-7. **Client-style README.** Architecture diagram, quick start, disaster
-   recovery and PITR runbooks, the drill explained, a real report pasted in,
-   links to the green scheduled drill run and the PR run, the benchmark
-   table, the outputs table, monthly cost, and "how to use this on your own
-   database" (EC2 instance profile or VPS with scoped keys).
+7. **Client-style README.** Architecture diagram, quick start, the best
+   practice list, a runbook per scenario (exact commands), a real report and a
+   short terminal log pasted in, the benchmark table, alerting setup, the
+   outputs table, monthly cost, and "how to use this on your own database"
+   (EC2 instance profile or VPS with a scoped IAM user).
+
+## Stretch
+
+- **Weekly public drill in GitHub Actions (`restore-drill.yml`).** Runs the
+  same `drill/run.sh` on a GitHub runner, weekly and on manual dispatch,
+  against S3 through an OIDC role (existing account OIDC provider, looked up
+  with a data source) trusted only for this repo's `master` branch and
+  scoped to `drill/*`. Report in the job summary; a failed run opens an issue.
+  Gives a public green run to link. MinIO in PR CI is not planned.
+- `restore` as a scheduled cron entry in the client's server (monthly restore
+  test next to the real database).
+- S3 Object Lock, a second repo (`repo2`) or a cross-region copy.
+- Pointing the kit at the tic-tac-toe app's database (done in
+  joheee/TicTacToeCICD).
 
 ## Out of scope
 
@@ -106,50 +185,48 @@ stretch goal, done in that repo, not a requirement here.
   a standby; this project is backup and restore only.
 - Amazon RDS. RDS has its own snapshots and PITR; this kit is for
   self-managed Postgres on a VM or VPS.
-- A long-running source server. The drill builds its own source each run.
-- S3 Object Lock, a second repo (`repo2`) or cross-region copies. Possible
-  stretch, listed in the README as next steps.
-- Running the kit on the tic-tac-toe production database (stretch, done in
-  TicTacToeCICD).
-- A screen recording. As in projects 1 and 4, the logged drill runs and the
-  reports are the proof.
+- A long-running server for the demo. Everything runs locally and is torn
+  down after.
+- A screen recording. As in projects 1 and 4, the saved reports and logs are
+  the proof.
 
 ## Constraints
 
 - Region `ap-southeast-2` only (org SCP). The SCP also denies
   `ec2:DescribeInstances`; nothing here needs it.
 - No DigitalOcean. AWS is used only for S3 and IAM.
-- Cost: S3 storage is under $1 a month with retention. Each scheduled drill
-  downloads its own backup from S3 to a GitHub runner (data transfer out,
-  about $0.11 per GB in `ap-southeast-2`); the small drill is a few MB, the
-  one-off 10 GB benchmark a few GB. Run the 10 GB benchmark once, not on a
-  schedule, and expire its objects.
-- No AWS access keys anywhere in GitHub; CI uses OIDC. The pgBackRest cipher
-  passphrase for a real stanza never goes in the repo.
+- Cost: S3 storage is under $1 a month with retention. Restores download from
+  S3 to the laptop; the first 100 GB a month of data out to the internet is
+  free, so the small drills and the one-off 10 GB benchmark cost nothing
+  extra. Run the 10 GB benchmark once, by hand, under `drill/` so it expires.
+- No AWS access keys in the repo or GitHub. The local IAM user's key lives
+  only in `.env` (mode 600, git-ignored). The cipher passphrase of a real
+  stanza never goes in the repo.
 
 ## Plan (3 days)
 
 | Day | Work |
 |---|---|
-| 1 | Harden the kit (objective 1). `terraform/` bucket, OIDC drill role and host policy, applied. `checks.yml` green. |
-| 2 | `drill/` script with latest and PITR restores, checks and report. `restore-drill.yml` on PRs (MinIO) and weekly against S3, issue on failure. First green scheduled run. |
-| 3 | 10 GB benchmark run and `docs/benchmark.md`. README handover with diagram, report, run links and cost. Upwork portfolio entry. |
+| 1 | Harden the kit and add alerting (objective 1). `terraform/` bucket, policy and IAM user, applied. `checks.yml` green. |
+| 2 | `restore` service and `drill/run.sh` with the four must-have scenarios, checks and report. |
+| 3 | Extra scenarios 5–8, 10 GB benchmark and `docs/benchmark.md`. README handover with diagram, runbooks, report and cost. Upwork portfolio entry. |
 
 ## Tools and software
 
-PostgreSQL 17 · pgBackRest · Amazon S3 · AWS IAM + GitHub OIDC · Terraform
-(>= 1.10) with the AWS provider 6.x · Docker + Compose · MinIO (CI) ·
-GitHub Actions (scheduled) · Bash · pgbench · amcheck · shellcheck ·
-hadolint · actionlint · tflint · Mermaid
+PostgreSQL 17 · pgBackRest · Amazon S3 · AWS IAM · Terraform (>= 1.10) with
+the AWS provider 6.x · Docker + Compose · Bash · pgbench · amcheck
+(`pg_amcheck`) · Healthchecks.io (dead-man's switch) · GitHub Actions
+(checks) · shellcheck · hadolint · actionlint · tflint · Mermaid
 
 ## Definition of done
 
 - [ ] Kit hardened: `ap-southeast-2` default, data checksums, no secrets in cron files, ports on localhost, `restore.sh` asks before wiping, versions pinned.
-- [ ] `terraform/` creates the bucket (encrypted, private, versioned, lifecycle rules), the OIDC drill role and the host policy, scoped to prefixes.
+- [ ] Backup jobs exit non-zero on failure, log to `docker logs`, alert through a webhook, and ping a dead-man's switch on success.
+- [ ] `terraform/` creates the bucket (encrypted, private, versioned, lifecycle only on `drill/` and old versions) and the stanza-scoped IAM policy and user.
 - [ ] `checks.yml` runs shellcheck, hadolint, actionlint, compose config, fmt, validate and tflint on every PR (green).
-- [ ] The drill restores the latest backup and a point in time, runs the checks and writes a Markdown/JSON report with timings and RPO.
-- [ ] The drill runs on every PR against MinIO and weekly against S3 through OIDC; a failed scheduled drill opens an issue.
-- [ ] A scheduled drill run against S3 is green and linked from the README.
+- [ ] The `restore` service restores into an empty directory with `archive_mode=off`, runs the checks and writes a Markdown/JSON report.
+- [ ] Must-have scenarios pass and are reported: latest restore with RPO, PITR before a `DELETE`, `pgbackrest verify` + `pg_amcheck`, failure alert.
+- [ ] Extra scenarios pass and are reported: named restore point, older set, single database, delta restore.
 - [ ] `docs/benchmark.md` has measured backup and restore times for a ~10 GB database.
-- [ ] No AWS keys or cipher passphrases in the repo or in GitHub Actions.
-- [ ] README has the diagram, runbooks, a real report, run links, benchmark, outputs table and monthly cost.
+- [ ] No AWS keys or cipher passphrases in the repo or in GitHub.
+- [ ] README has the diagram, best practice list, a runbook per scenario, a real report, benchmark, outputs table and monthly cost.
