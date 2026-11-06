@@ -7,7 +7,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # hadolint ignore=DL3008
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates gnupg cron jq && \
+    apt-get install -y --no-install-recommends curl ca-certificates gnupg cron jq gawk && \
     curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | \
       gpg --dearmor -o /usr/share/keyrings/pgdg.gpg && \
     echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
@@ -28,8 +28,9 @@ RUN groupmod -o -g 999 postgres && \
 
 # Crontab and the job env file are written at container start by the
 # entrypoint, because the schedules and secrets come from env vars.
-COPY entrypoint.sh run-job.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/run-job.sh
+COPY entrypoint.sh run-job.sh status.sh countdown.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/run-job.sh \
+    /usr/local/bin/status.sh /usr/local/bin/countdown.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["cron", "-f"]

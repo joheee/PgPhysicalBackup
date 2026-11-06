@@ -37,11 +37,34 @@ ${PGBACKREST_BACKUP_CHECK_CRON}  root  /usr/local/bin/run-job.sh check check
 CRON
 chmod 644 /etc/cron.d/pgbackrest
 
-echo "Backup container started: stanza=${PGBACKREST_STANZA}"
-echo "Cron schedule:"
-cat /etc/cron.d/pgbackrest
+echo "Backup container started: stanza=${PGBACKREST_STANZA} (all times UTC)"
+/usr/local/bin/status.sh
+echo "Extra commands (run on your host):"
+echo "  docker exec -it pg-cron-backup countdown.sh --live   # live countdown, one line, nothing stored (Ctrl-C quits)"
+echo "  docker exec pg-cron-backup status.sh                 # next run times"
+echo "  docker exec -u postgres pg-cron-backup pgbackrest --stanza=${PGBACKREST_STANZA} info   # backups in S3"
 if [ -z "${ALERT_WEBHOOK_URL:-}" ]; then
     echo "WARNING: ALERT_WEBHOOK_URL is not set; failures will only appear in docker logs."
+fi
+
+# Live countdown without storing anything:
+#   docker exec -it pg-cron-backup countdown.sh --live
+# COUNTDOWN_INTERVAL_SECONDS=N also appends a countdown line to docker logs every
+# N seconds (default 1). Disk use is capped by the log rotation in
+# docker-compose.yml. 0 leaves an hourly one-line reminder instead.
+interval="${COUNTDOWN_INTERVAL_SECONDS:-1}"
+if ! [[ "$interval" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: COUNTDOWN_INTERVAL_SECONDS must be a whole number of seconds (0 = off)" >&2
+    exit 1
+fi
+if [ "$interval" -gt 0 ]; then
+    /usr/local/bin/countdown.sh "$interval" &
+else
+    (
+        while sleep 3600; do
+            printf '%s [scheduler] %s\n' "$(date -u +%FT%TZ)" "$(/usr/local/bin/status.sh --short)"
+        done
+    ) &
 fi
 
 exec "$@"

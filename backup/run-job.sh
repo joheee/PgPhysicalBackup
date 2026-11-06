@@ -16,6 +16,12 @@ shift
 : "${PGBACKREST_STANZA:?PGBACKREST_STANZA missing from /etc/pgbackrest-job.env}"
 
 LOG_SINK=/proc/1/fd/1
+case "$job" in
+    full) label="Full backup" ;;
+    diff) label="Differential backup" ;;
+    check) label="Health check" ;;
+    *) label="$job" ;;
+esac
 log() { printf '%s [%s] %s\n' "$(date -u +%FT%TZ)" "$job" "$*" | tee -a "$LOG_SINK"; }
 
 # Per-job dead-man's switch URL, e.g. HEALTHCHECK_URL_FULL.
@@ -39,20 +45,26 @@ alert() { # alert <message>
 out="$(mktemp)"
 trap 'rm -f "$out"' EXIT
 
-log "start: pgbackrest --stanza=${PGBACKREST_STANZA} $*"
+log "${label}: started (stanza ${PGBACKREST_STANZA})"
 
 # Run as postgres; the env (secrets) comes from the env file sourced above.
+# The full output is kept in $out for the alert. The log hides two kinds of
+# noise: one line per file copied, and the long "command begin" option dump.
+SECONDS=0
 runuser -u postgres -- pgbackrest --stanza="$PGBACKREST_STANZA" --log-level-console=info "$@" 2>&1 |
-    tee "$out" >>"$LOG_SINK"
+    tee "$out" |
+    grep --line-buffered -v -E 'INFO: (backup|archive) file |command begin' >>"$LOG_SINK"
 rc="${PIPESTATUS[0]}"
+took="$((SECONDS / 60))m $((SECONDS % 60))s"
 
 if [ "$rc" -eq 0 ]; then
-    log "ok"
+    log "${label}: finished OK in ${took}"
     ping_hc
 else
-    log "FAILED with exit code $rc"
+    log "${label}: FAILED after ${took} (exit code ${rc})"
     ping_hc /fail
     alert "pgBackRest job '${job}' FAILED on $(hostname) (stanza ${PGBACKREST_STANZA}, exit ${rc}):
 $(tail -n 15 "$out")"
 fi
+/usr/local/bin/status.sh --short | sed "s/^/$(date -u +%FT%TZ) [scheduler] /" | tee -a "$LOG_SINK" >/dev/null
 exit "$rc"

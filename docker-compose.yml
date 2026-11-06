@@ -1,6 +1,7 @@
 # ── Single-PG pgBackRest → S3 deployment ──────────────────
 # Run ./start.sh to generate configs, build images, and start containers.
 # Run ./restore.sh on a fresh host to recover from the latest backup.
+name: pgdemo
 
 services:
   # ── PostgreSQL (archives WAL to S3) ─────────────────────
@@ -12,7 +13,7 @@ services:
     hostname: pg
     ports:
       # Localhost only. Put a reverse proxy or SSH tunnel in front for remote access.
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:5434:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
@@ -64,6 +65,19 @@ services:
       HEALTHCHECK_URL_FULL: ${HEALTHCHECK_URL_FULL:-}
       HEALTHCHECK_URL_DIFF: ${HEALTHCHECK_URL_DIFF:-}
       HEALTHCHECK_URL_CHECK: ${HEALTHCHECK_URL_CHECK:-}
+      # Seconds between countdown lines in docker logs (0 = off). 1 writes about 12 MB a day.
+      COUNTDOWN_INTERVAL_SECONDS: ${COUNTDOWN_INTERVAL_SECONDS:-1}
+    # Log rotation. Docker can only rotate by SIZE, not by time, so the size is picked
+    # to match the countdown: 1 line/s x 148 B = 12.2 MiB a day, so a 37m file fills in
+    # about 3 days, then Docker starts a new file and compresses the old one (about 35x
+    # smaller). With max-file 2 you keep the current file plus the previous one, so
+    # 3 to 6 days of history. Disk use peaks at about 38 MiB. If you change
+    # COUNTDOWN_INTERVAL_SECONDS, change max-size in proportion (e.g. interval 10 -> 370m).
+    logging:
+      driver: local
+      options:
+        max-size: "37m"
+        max-file: "2"
     env_file:
       - path: ./configs/s3-keys.env
         required: false

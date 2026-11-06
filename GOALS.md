@@ -63,16 +63,31 @@ database's archive. `archive_mode=off` stops that.
 - **Encryption:** client-side `aes-256-cbc` plus SSE-S3 on the bucket.
 - **Data checksums** on at `initdb` (`--data-checksums`), so pgBackRest checks
   every page during backup.
-- **Secrets out of world-readable files:** the cipher passphrase and any keys
-  live in a mode-600 env file that the cron jobs read, never in
-  `/etc/cron.d`, a command line or a log. On EC2, use an instance profile
-  (`repo1-s3-key-type=auto`) and no keys at all.
+- **Secrets out of world-readable files:** pgBackRest does not expand `${VAR}`
+  in its config, so the passphrase reaches it as the `PGBACKREST_REPO1_CIPHER_PASS`
+  environment variable and never sits in a `.conf`. In the backup container the
+  cron jobs read a root-only mode-600 env file (`/etc/pgbackrest-job.env`);
+  `/etc/cron.d` holds schedules only. Static S3 keys live in the git-ignored
+  mode-600 `.env` and a generated mode-600 `configs/s3-keys.env`
+  (`repo1-s3-key-type=shared`). Nothing secret is on a command line or in a
+  log. On EC2, use an instance profile (`repo1-s3-key-type=auto`) and no keys.
 - **No overlapping jobs:** pgBackRest's stanza lock stops two backups running
   at once; a job that finds the lock held logs it and exits non-zero.
-- **Failures are loud:** every job exits non-zero on failure, its output shows
-  in `docker logs`, and it posts to a webhook (Slack or similar). Each
-  successful backup pings a dead-man's switch (Healthchecks.io free tier), so
-  a backup that silently stops running also raises an alert.
+- **Failures are loud:** every job goes through `backup/run-job.sh`, which
+  exits non-zero on failure, shows its output in `docker logs` ("Full backup:
+  started", "finished OK in 4m 12s" or "FAILED after ... (exit code N)"), and
+  posts to a webhook (Slack or similar). Each successful backup pings a
+  dead-man's switch (Healthchecks.io free tier), and a failure pings `/fail`, so
+  a backup that silently stops running also raises an alert. The
+  webhook and switch are optional (URLs in `.env`).
+- **Readable logs of the backup container:** a startup table of the next
+  full, differential and check runs, a `[countdown] Label [HH:MM:SS]` line every
+  second (`COUNTDOWN_INTERVAL_SECONDS`, 0 = off), a `[scheduler] next:` line after
+  every job, and the per-file `backup file` noise filtered out. Extra
+  commands: `status.sh` (next run times) and `countdown.sh --live` (one line
+  that redraws in place and stores nothing). Docker rotates the log by size,
+  not time: `local` driver, `max-size 37m` (about 3 days at one line a second),
+  `max-file 2`, rotated files compressed, so disk use peaks near 38 MiB.
 - **Restore safety:** restores go into an empty data directory, `initdb` never
   runs before a restore, nothing wipes data without a prompt or `--yes`,
   PITR uses `--target-action=promote`, and the restored copy runs with
@@ -135,7 +150,10 @@ run.
    noncurrent versions expired after 7 days (a deleted backup can be recovered
    for a week), abort incomplete multipart uploads, and an expiry rule on the
    `drill/` prefix only. An IAM policy scoped to one stanza prefix (the JSON is
-   committed in `docs/`), attached to an IAM user for the local demo (its
+   committed in `docs/`: `s3:ListBucket` on the bucket limited to the
+   `pgbackrest/` and `drill/` prefixes, and `GetObject`, `PutObject`,
+   `DeleteObject` on those prefixes only; no `DeleteObjectVersion`, so a
+   leaked key can't destroy the noncurrent versions), attached to an IAM user for the local demo (its
    access key is kept only in the mode-600 `.env`, and deactivated after
    demos) and usable as an EC2 instance profile policy for a real host. The
    doc lists the exact settings so anyone can repeat them; no AWS infrastructure
@@ -203,6 +221,31 @@ run.
 - No AWS access keys in the repo or GitHub. The local IAM user's key lives
   only in `.env` (mode 600, git-ignored). The cipher passphrase of a real
   stanza never goes in the repo.
+
+## Progress (updated 2026-11-07)
+
+**Built and tested**
+- Kit hardened (objective 1 except the alerting URLs): `ap-southeast-2`
+  default, data checksums (verified `on`), localhost-only ports (`pg` on
+  `127.0.0.1:5434`, pgAdmin behind the `pgadmin` profile on `127.0.0.1:5435`),
+  pinned images (digests) and pgBackRest `2.60.0-1.pgdg12+1`, secrets out of
+  cron files, `restore.sh` asks before wiping (`--yes` to skip).
+- Found and fixed: the cipher passphrase was never applied (`${...}` is not
+  expanded), and empty S3-key variables are an error in pgBackRest.
+- `backup/run-job.sh` failure path tested: non-zero exit, `docker logs`
+  output, webhook JSON alert and `/fail` ping all fired against a stand-in
+  listener. Readable logs and countdown built (see best practice above).
+- Real S3: bucket and scoped IAM user created by hand, `stanza-create`, `check`
+  and a first full backup (`20261106-183638F`) succeeded.
+
+**Still to do**
+- Set real `ALERT_WEBHOOK_URL` and `HEALTHCHECK_URL_*` and see a success ping and
+  a failure alert arrive; then tick the alerting box.
+- `docs/aws-setup.md` and the committed IAM policy JSON; confirm the bucket
+  settings match objective 2.
+- `.github/workflows/checks.yml`.
+- Day 2: `restore` service, `drill/run.sh`, must-have scenarios, reports.
+- Day 3: extra scenarios, 10 GB benchmark, README rewrite.
 
 ## Plan (3 days)
 
