@@ -6,6 +6,7 @@
 #
 # Scenario, all optional (see README "Restore container"):
 #   RESTORE_TYPE=time|name  RESTORE_TARGET=<timestamp|restore point name>
+#   RESTORE_TYPE=immediate  (stop as soon as the backup is consistent, no target)
 #   RESTORE_SET=<backup label>   RESTORE_DB_INCLUDE=<database>
 #   RESTORE_DELTA=1   (restore onto an existing directory, fetching changed files only)
 #   RESTORE_KEEP=1    (keep the restored data after the run)
@@ -40,9 +41,12 @@ now() { date +%s.%N; }
 elapsed() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.1f", b - a }'; }
 
 # ── validate the request ────────────────────────────────
-case "$TYPE" in "" | time | name) ;; *) die "RESTORE_TYPE must be empty, time or name (got '$TYPE')" ;; esac
-[ -n "$TYPE" ] && [ -z "$TARGET" ] && die "RESTORE_TYPE=$TYPE needs RESTORE_TARGET"
-[ -z "$TYPE" ] && [ -n "$TARGET" ] && die "RESTORE_TARGET needs RESTORE_TYPE=time or name"
+case "$TYPE" in "" | time | name | immediate) ;; *) die "RESTORE_TYPE must be empty, time, name or immediate (got '$TYPE')" ;; esac
+case "$TYPE" in
+    time | name) [ -n "$TARGET" ] || die "RESTORE_TYPE=$TYPE needs RESTORE_TARGET" ;;
+    immediate) [ -z "$TARGET" ] || die "RESTORE_TYPE=immediate takes no RESTORE_TARGET" ;;
+    "") [ -z "$TARGET" ] || die "RESTORE_TARGET needs RESTORE_TYPE=time or name" ;;
+esac
 [[ "$SET" =~ ^[0-9A-Za-z_-]*$ ]] || die "RESTORE_SET must be a backup label such as 20261106-183638F"
 [[ "$DB_INCLUDE" =~ ^[0-9A-Za-z_]*$ ]] || die "RESTORE_DB_INCLUDE must be a database name"
 case "$DB_INCLUDE" in
@@ -55,7 +59,7 @@ done
 [ -n "${PGBACKREST_REPO1_CIPHER_PASS:-}" ] || die "PGBACKREST_REPO1_CIPHER_PASS is not set"
 
 parts=()
-case "$TYPE" in time) parts+=(pitr) ;; name) parts+=(named-point) ;; esac
+case "$TYPE" in time) parts+=(pitr) ;; name) parts+=(named-point) ;; immediate) parts+=(immediate) ;; esac
 [ -n "$SET" ] && parts+=(older-set)
 [ -n "$DB_INCLUDE" ] && parts+=(single-db)
 [ "$DELTA" = 1 ] && parts+=(delta)
@@ -108,7 +112,10 @@ record backup_found PASS "$backup_label ($backup_type)"
 
 # ── restore ─────────────────────────────────────────────
 args=(--stanza="$STANZA" --pg1-path="$PGDATA" --archive-mode=off --log-level-console=info)
-[ -n "$TYPE" ] && args+=(--type="$TYPE" --target="$TARGET" --target-action=promote)
+case "$TYPE" in
+    time | name) args+=(--type="$TYPE" --target="$TARGET" --target-action=promote) ;;
+    immediate) args+=(--type=immediate --target-action=promote) ;;
+esac
 [ -n "$SET" ] && args+=(--set="$SET")
 [ -n "$DB_INCLUDE" ] && args+=(--db-include="$DB_INCLUDE")
 [ "$DELTA" = 1 ] && args+=(--delta)

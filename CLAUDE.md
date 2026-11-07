@@ -21,7 +21,7 @@ the "backups you can prove restore, with measured numbers" story clearer.
   `pg`, `pg-cron-backup` and (optional, profile `pgadmin`) `pgadmin`. Host
   ports: `pg` on `127.0.0.1:5434`, pgAdmin on `127.0.0.1:5435`. pgAdmin
   reaches Postgres as host `pg`, port `5432`.
-- The drill (`drill/run.sh`, not built yet) is self-contained: it seeds its own
+- The drill (`drill/run.sh`) is self-contained: it seeds its own
   data on a throwaway stanza under `drill/<run-id>/` and never touches the real
   stanza. Its source is a throwaway `drill-source` container (own Compose
   profile) that the script starts and removes; it drives the `restore`
@@ -55,8 +55,10 @@ the "backups you can prove restore, with measured numbers" story clearer.
   bucket settings and IAM policy, alerting, operations, troubleshooting,
   roadmap). Keep it in step with what is built; don't claim measured numbers
   that haven't been measured.
-- `drill/`: `run.sh` (all scenarios, or one with `--scenario`), sample
-  schema and canary SQL, checks and report template.
+- `drill/`: `run.sh` (must-haves by default, `--scenario all` or a comma
+  list, `--keep`), `seed.sql` (orders, canary, schema_migrations) and
+  `listener.py` (stand-in webhook and dead-man's switch on the Compose
+  network). Reports go to `reports/drill-<run-id>/`.
 - `docs/`: `benchmark.md`, `reports/` (sample reports), runbooks if the
   README gets long.
 - `.github/workflows/`: `checks.yml` (lint and validate, no AWS). Optional
@@ -85,7 +87,9 @@ the "backups you can prove restore, with measured numbers" story clearer.
   and never wipe a data directory without a confirmation or `--yes`. The one
   exception is the restore container clearing its own `pgdemo_restore-data`
   volume after a run that started empty (never after `RESTORE_DELTA=1`, and
-  never anything mounted from `pg-data`). A
+  never anything mounted from `pg-data`), and `drill/run.sh` removing the
+  volumes it created itself (`pgdemo_drill-*`); it refuses to start when they
+  already exist. A
   restored copy runs with `archive_mode=off` so it can't write into the
   source stanza; PITR uses `--target-action=promote`.
 - Never put S3 lifecycle rules on live stanza paths; pgBackRest retention
@@ -152,5 +156,10 @@ the "backups you can prove restore, with measured numbers" story clearer.
   target T.
 - zsh aborts a whole command when one glob matches nothing (`rm -f a* b*`); use
   `find ... -delete` for clean-up.
+- Compose interpolation reads the shell environment before `.env`; the drill
+  relies on that to point the `restore` service at its own stanza, path,
+  passphrase and volume. `pgbackrest stop` on the source makes `archive-push`
+  fail, which is how the drill stops archiving without changing
+  `archive_command` (a `-c` flag beats `ALTER SYSTEM`).
 - Do not use `pkill -f <pattern>` when the pattern also appears in your own
   shell command line; it kills the shell.

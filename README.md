@@ -4,7 +4,7 @@
 
 Physical PostgreSQL 17 backups with **pgBackRest → Amazon S3**, run by Docker Compose: continuous WAL archiving, scheduled full and differential backups, client-side AES-256 encryption, alerts when a job fails or stops running, and a script to rebuild a host from the latest backup.
 
-The goal of the project is **backups you can prove restore, with measured numbers**. A throwaway `restore` container now restores from S3, checks the result and writes a report; the scripted drill that exercises every scenario is still planned. See [Status](#status).
+The goal of the project is **backups you can prove restore, with measured numbers**. A throwaway `restore` container restores from S3, checks the result and writes a report, and `drill/run.sh` runs every recovery scenario end to end on a throwaway stanza. See [Status](#status).
 
 ## Status
 
@@ -16,10 +16,10 @@ The goal of the project is **backups you can prove restore, with measured number
 | Readable logs (schedule table, countdown, live view) | Built and tested. |
 | CI (`checks.yml`: shellcheck, hadolint, actionlint, compose config) | Built; every step passes locally. |
 | `restore` container: latest, point-in-time, named restore point, older set and delta restores into an empty directory with `archive_mode=off`, checks, Markdown + JSON report | Built and run against the real S3 stanza. All scenarios pass except single-database, which needs a user database (see below). |
-| `drill/run.sh`: self-contained drill on a throwaway stanza with seeded data (RPO, row-count checks, `verify`, failure scenario) | **Planned.** The container already supports its expectation file; no data has been seeded yet. |
-| Single-database restore, 10 GB benchmark, committed sample reports | **Planned.** |
+| `drill/run.sh`: self-contained drill on a throwaway stanza with seeded data (RPO, row-count checks, `verify`, failure alerts, all 8 scenarios) | Built. Tested end to end with a local file repository standing in for S3: all restore scenarios and the stopped-archiving failure pass. **Not yet run against S3**, so no sample reports are committed. |
+| 10 GB benchmark, committed sample reports | **Planned.** |
 
-So far the measured numbers come from a 22 MB test database (see [Measured so far](#measured-so-far)). RPO has not been measured yet, because it needs the drill's canary data.
+So far the measured numbers come from a 22 MB test database (see [Measured so far](#measured-so-far)). RPO has not been measured against S3 yet; the drill measures it from its canary table.
 
 ## Architecture
 
@@ -54,11 +54,15 @@ flowchart LR
 
 ```
 .
-├── docker-compose.yml          # project "pgdemo": pg, backup, pgadmin (profile)
+├── docker-compose.yml          # project "pgdemo": pg, backup, restore / pgadmin / drill (profiles)
 ├── start.sh                    # generate configs, build, start pg + backup, create stanza
 ├── restore.sh                  # DR: rebuild this host from the latest backup
 ├── .env.example                # all configuration (copy to .env, chmod 600)
 ├── pg/Dockerfile               # postgres:17.11 (digest-pinned) + pgBackRest 2.60.0
+├── drill/
+│   ├── run.sh                  # the restore drill: throwaway source + stanza, every scenario, summary
+│   ├── seed.sql                # orders, canary and schema_migrations tables
+│   └── listener.py             # stand-in webhook / dead-man's switch for the failure scenario
 ├── restore/
 │   ├── Dockerfile              # same base + pgBackRest, plus jq
 │   ├── entrypoint.sh           # preflight → restore → start → wait → checks → report → clean up
@@ -314,7 +318,7 @@ RESTORE_VERIFY=1 docker compose run --rm restore          # also run `pgbackrest
 
 | Variable | Meaning |
 |---|---|
-| `RESTORE_TYPE` / `RESTORE_TARGET` | `time` (a timestamp with a zone, such as `2026-11-06 20:04:01+00`) or `name` (a restore point). Always `--target-action=promote`. |
+| `RESTORE_TYPE` / `RESTORE_TARGET` | `time` (a timestamp with a zone, such as `2026-11-06 20:04:01+00`) or `name` (a restore point). `immediate` (no target) stops as soon as the backup is consistent, which with `RESTORE_SET` gives that backup exactly as it was. Always `--target-action=promote`. |
 | `RESTORE_SET` | A backup label from `pgbackrest info` |
 | `RESTORE_DB_INCLUDE` | A **user** database. pgBackRest always restores system databases, and the container rejects `postgres`, `template0` and `template1`. The other user databases come back as empty placeholders and must be dropped. |
 | `RESTORE_DELTA` | `1` restores onto an existing directory and only fetches changed files |
@@ -323,6 +327,7 @@ RESTORE_VERIFY=1 docker compose run --rm restore          # also run `pgbackrest
 | `EXPECT_FILE` | JSON of facts from the source (row counts, canary table, failure time, RPO limit); see `restore/checks.sh`. The drill supplies it. |
 | `PGBACKREST_STANZA` / `PGBACKREST_REPO1_PATH` | Point at another stanza or repository path (the drill uses these) |
 | `PGBACKREST_PROCESS_MAX` | Parallel download workers (default `4`) |
+| `RESTORE_DATA_VOLUME` | The volume to restore into (default `restore-data`; the drill uses `drill-restore-data`) |
 
 **Checks:** the backup was found; the restore succeeded; recovery finished; `archive_mode` is `off`; data checksums are on; the server answers queries; `pg_amcheck --all` finds no corruption; for a targeted restore, Postgres's own log line showing where it stopped (for example `recovery stopping before commit of transaction 754` or `recovery stopping at restore point "restore_test_1"`); and, with an `EXPECT_FILE`, the row counts and RPO. The exit code is non-zero if any check fails, and a report that cannot be built also fails the run.
 
@@ -352,6 +357,50 @@ From the real stanza, on one laptop against S3 in `ap-southeast-2`, restoring a 
 | Delta onto the previous restore | 7.7 s | 15.7 s |
 
 Why a small database is slow: pgBackRest fetches every file with its own S3 request, and a cluster has about a thousand small files, so latency dominates, not size. Parallel workers gave about 4x here. Delta restore skips files that already match and was about 8x faster than a full restore. pgBackRest's `repo1-bundle` option groups small files at backup time and would cut the per-file requests; it applies only to new backups and has not been tried here.
+
+### Restore drill (`drill/run.sh`)
+
+Runs the recovery scenarios end to end and reports pass/fail, restore time and RPO. It never touches `pg`, `pg-data` or the real stanza: it starts a throwaway `drill-source` Postgres (Compose profile `drill`) that archives to its own stanza, `drill`, under `drill/<run-id>/` in the same bucket, with a random cipher passphrase for the run. Needs `./start.sh` to have run once (or `./start.sh gen-configs`), and `jq` on the host.
+
+```bash
+drill/run.sh                          # must-haves: latest (+ verify), pitr, failure
+drill/run.sh --scenario all           # all scenarios (about 10 minutes for the small default data set)
+drill/run.sh --scenario pitr,delta    # only these; the seed and backups always run
+drill/run.sh --keep                   # keep the drill containers and volumes for a look afterwards
+```
+
+What one run does:
+
+1. Starts `drill-source` (no ports, unix socket only) and a stand-in webhook listener, creates the `drill` stanza.
+2. Seeds `appdb` (pgbench at `DRILL_PGBENCH_SCALE`, 1000 `orders`, `schema_migrations`) and `reportsdb`, and starts a canary that commits one row a second.
+3. Full backup, `pgbench` for `DRILL_PGBENCH_SECONDS`, 500 more orders, differential backup.
+4. Failure scenario (below).
+5. The mistakes, in order: `pg_create_restore_point('drill_pre_migration')`, a bad migration (zeroes every amount, deletes a third of the orders), 200 more orders, a recorded time T, `DELETE FROM orders`, 50 new orders. It waits until that WAL is in the repository, then `docker kill`s the source a few seconds later (a crash, not a clean shutdown).
+6. Writes an `EXPECT_FILE` per scenario with what the source knew (exact row counts, canary count, the kill time, the RPO limit) and runs the restore container once per scenario into its own `drill-restore-data` volume.
+7. Writes `reports/drill-<run-id>/summary.md` and `summary.json` (backups with size and duration, one row per scenario) next to each scenario's JSON and Markdown report and its logs. Exit code 1 if any check fails.
+
+| Scenario | Restore | What must be true afterwards |
+|---|---|---|
+| `latest` | Latest backup plus all archived WAL, and `pgbackrest verify` on the repository | Final row counts match the source; RPO (kill time minus the newest restored canary row) is under `DRILL_RPO_MAX_SECONDS` (default `2 x archive_timeout + 10`) |
+| `pitr` | `--type=time --target=T` | Postgres stopped before the first commit after T; the orders deleted after T are back |
+| `failure` | none | `run-job.sh check` with fake S3 keys and, separately, with archiving stopped (`pgbackrest stop` on the source), exits non-zero, posts the webhook and pings `/fail`; once archiving is back the same job passes and sends the success ping only |
+| `named-point` | `--type=name --target=drill_pre_migration` | Orders as before the bad migration, no migration row |
+| `older-set` | `--set=<full backup> --type=immediate` | Exactly the full backup: 1000 orders, empty `pgbench_history` |
+| `single-db` | `--db-include=appdb` | `appdb` matches the source; `reportsdb` comes back as an empty placeholder (drop it) |
+| `delta` | After `latest` (kept), the `orders` table file is removed from the copy, then `--delta` | The table is back and every count matches; the report shows the delta time next to the full restore |
+
+`pg_amcheck` and the generic checks (recovery finished, `archive_mode=off`, data checksums, queryable) run in every restore scenario.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DRILL_PGBENCH_SCALE` | `1` | pgbench scale (1 gives a cluster of about 50 MB; 680 is about 10 GB) |
+| `DRILL_PGBENCH_SECONDS` | `15` | pgbench run between the full and the differential backup |
+| `DRILL_ARCHIVE_TIMEOUT` | `10` | `archive_timeout` of the drill source, which bounds the RPO |
+| `DRILL_RPO_MAX_SECONDS` | `2 x archive_timeout + 10` | RPO limit for the `latest`, `single-db` and `delta` checks |
+
+**Cleanup:** at the end (pass or fail) the drill removes its own containers and volumes (`drill-source`, `drill-listener`, `pgdemo_drill-source-data`, `pgdemo_drill-socket`, `pgdemo_drill-restore-data`), never anything else. If those volumes already exist when it starts (a `--keep` run or a crash), it refuses and prints the commands to remove them. The drill's objects stay in S3 under `drill/<run-id>/` and expire through the bucket's `drill/` lifecycle rule; nothing deletes them by hand.
+
+**Secrets:** the random passphrase reaches the containers only through environment variables, never a command line or a file, and pgBackRest prints it as `<redacted>`. The failure scenario uses AWS's documented example key ID, which can never be valid.
 
 ### Disaster recovery (`restore.sh`)
 
@@ -406,6 +455,7 @@ docker exec -u postgres pg pgbackrest --stanza=pg stanza-create
 | `[040] unable to restore … contains files` | Restore target is not empty | Wipe the data directory first (`restore.sh` does) |
 | `[055] stop file does not exist` | `stanza-delete` needs `stop` first | Run `pgbackrest … stop` first |
 | `[038] postmaster.pid exists` | Postgres is running during `stanza-delete` | Add `--force` |
+| `drill/run.sh`: `volume pgdemo_drill-... is left over` | An earlier drill ran with `--keep` or crashed | Run the two commands it prints |
 | Restore container exits with code 2: `... is not empty` | A previous run kept its data (`RESTORE_KEEP=1` or a delta run) | `docker volume rm pgdemo_restore-data`, or run with `RESTORE_DELTA=1` |
 | Restore takes minutes for a tiny database | One S3 request per file, one worker | Raise `PGBACKREST_PROCESS_MAX`; consider `repo1-bundle` for new backups |
 | `[081] system databases (template0, postgres, etc.) are included by default` | `RESTORE_DB_INCLUDE` named a system database | Name a user database |
@@ -435,16 +485,15 @@ docker compose --profile pgadmin up -d pgadmin
 git ls-files '*.sh' | xargs shellcheck
 for f in $(git ls-files '*Dockerfile'); do docker run --rm -i hadolint/hadolint:v2.15.1 < "$f"; done
 docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12
-docker compose --env-file .env.example --profile pgadmin --profile restore config -q
+docker compose --env-file .env.example --profile pgadmin --profile restore --profile drill config -q
 ```
 
 ## Roadmap
 
-Done: the `restore` container (see [Restore container](#restore-container)). Still planned, in order (see `GOALS.md` for the full definition of done):
+Done: the `restore` container (see [Restore container](#restore-container)) and `drill/run.sh` (see [Restore drill](#restore-drill-drillrunsh)). Still planned, in order (see `GOALS.md` for the full definition of done):
 
-1. **`drill/run.sh`.** A self-contained drill on its own stanza under `drill/<run-id>/` with a random passphrase and a throwaway source database, so it never touches the real stanza. It seeds pgbench, `orders` and `canary` data, takes a full and a differential backup, keeps writing, then calls the restore container once per scenario with an `EXPECT_FILE`.
-2. **Must-have scenarios with their numbers:** latest restore after a crash (`docker kill pg`) with measured RPO; point-in-time recovery before a `DELETE FROM orders`, proving the rows are back; `pgbackrest verify` + `pg_amcheck`; a caught failure (broken credentials, stopped archiving).
-3. **Extras:** named restore point before a bad migration, older backup set, single database (needs the drill's `appdb`), delta restore timed against a full one.
-4. **Measured at ~10 GB:** backup time, compressed size, restore time and WAL replay time, with sample reports saved under `docs/reports/`.
+1. **Run the drill against S3** and commit its reports to `docs/reports/`.
+2. **Every scenario passing against S3 with its numbers:** the must-haves (latest with RPO, point-in-time, `verify` + `pg_amcheck`, caught failures) and the extras (named restore point, older set, single database, delta). All of them are scripted in the drill; the broken-credentials failure can only be shown against S3.
+3. **Measured at ~10 GB:** backup time, compressed size, restore time and WAL replay time, with sample reports saved under `docs/reports/`.
 
 Stretch: a weekly GitHub Actions drill against S3 over OIDC, and a monthly restore test on the client's server.

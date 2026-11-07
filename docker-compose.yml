@@ -116,8 +116,54 @@ services:
         required: false
     volumes:
       - ./configs/pg-pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
-      - restore-data:/var/lib/postgresql/data
+      # The drill points this at its own volume (RESTORE_DATA_VOLUME=drill-restore-data).
+      - ${RESTORE_DATA_VOLUME:-restore-data}:/var/lib/postgresql/data
       - ./reports:/reports
+
+  # ── Drill source (throwaway, started and removed by drill/run.sh) ──
+  # A second Postgres that archives to its own stanza under drill/<run-id>/ with a
+  # random passphrase, so the drill never touches pg, pg-data or the real stanza.
+  # No ports. Every DRILL_* value is set by drill/run.sh.
+  drill-source:
+    profiles: ["drill"]
+    build:
+      context: ./pg
+      dockerfile: Dockerfile
+    environment:
+      POSTGRES_USER: postgres
+      # Only reachable through the unix socket inside the container.
+      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+      PGBACKREST_REPO1_PATH: ${DRILL_REPO_PATH:-/drill/unset}
+      PGBACKREST_REPO1_CIPHER_PASS: ${DRILL_CIPHER_PASS:-}
+      PGBACKREST_PG1_PATH: /var/lib/postgresql/data
+      PGBACKREST_REPO1_RETENTION_FULL: "2"
+      PGBACKREST_COMPRESS_TYPE: zst
+      PGBACKREST_START_FAST: "y"
+      PGBACKREST_PROCESS_MAX: ${PGBACKREST_PROCESS_MAX:-4}
+    env_file:
+      - path: ./configs/s3-keys.env
+        required: false
+    command: >
+      postgres
+      -c archive_mode=on
+      -c archive_command='pgbackrest --stanza=drill archive-push %p'
+      -c wal_level=replica
+      -c archive_timeout=${DRILL_ARCHIVE_TIMEOUT:-10}
+      -c listen_addresses=''
+    volumes:
+      - drill-source-data:/var/lib/postgresql/data
+      - drill-socket:/var/run/postgresql
+      - ./configs/pg-pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
+
+  # Stand-in for the alert webhook and the dead-man's switch in the failure scenario.
+  # Compose network only, no ports.
+  drill-listener:
+    profiles: ["drill"]
+    image: python:3.13-alpine@sha256:1e1f6334529d1fb26a2ef619d7cffb30a7c7d7cc1cc7338ebee283a58d1aeaca
+    command: ["python3", "-u", "/listener.py"]
+    volumes:
+      - ./drill/listener.py:/listener.py:ro
 
   # ── pgAdmin (web UI, optional) ──────────────────────────
   # Off by default. Start with: docker compose --profile pgadmin up -d pgadmin
@@ -141,3 +187,7 @@ services:
 volumes:
   # Target of the restore container. Empty between runs (the container clears it).
   restore-data:
+  # Drill-only volumes: created by drill/run.sh and removed when it ends (--keep keeps them).
+  drill-restore-data:
+  drill-source-data:
+  drill-socket:

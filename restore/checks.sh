@@ -58,7 +58,7 @@ check_recovery_target() {
     if [ -n "$line" ]; then
         record recovery_target_reached PASS "$line"
     else
-        record recovery_target_reached FAIL "no 'recovery stopping' line in the Postgres log for target $TYPE=$TARGET"
+        record recovery_target_reached FAIL "no 'recovery stopping' line in the Postgres log for target $TYPE${TARGET:+=$TARGET}"
     fi
 }
 

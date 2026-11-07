@@ -48,4 +48,4 @@ jobs:
       - name: docker compose config
         run: |
           docker compose --env-file .env.example config -q
-          docker compose --env-file .env.example --profile pgadmin --profile restore config -q
+          docker compose --env-file .env.example --profile pgadmin --profile restore --profile drill config -q

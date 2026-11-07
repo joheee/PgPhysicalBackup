@@ -168,7 +168,7 @@ run.
      and an optional `EXPECT_FILE` (JSON) carries what only the source knows:
      row counts, the canary table, the time the source died and an RPO limit.
      `PGBACKREST_STANZA` and `PGBACKREST_REPO1_PATH` point it at another stanza.
-   - **`drill/run.sh`: planned.** It runs the scenarios end to end on a
+   - **`drill/run.sh`: built.** It runs the scenarios end to end on a
      throwaway stanza under `drill/<run-id>/` with a random cipher passphrase,
      so a demo never touches the real stanza. The source is a throwaway
      `drill-source` container (its own Compose profile) that archives to that
@@ -259,6 +259,16 @@ run.
   delta 7.7 s (README "Measured so far"). These are not benchmark numbers.
 - Found and fixed while building it: the reserved word `label` breaks jq 1.6
   reports, and `--db-include` rejects system databases.
+- `drill/run.sh` built (2026-11-07): throwaway `drill-source` (Compose profile
+  `drill`) on stanza `drill` at `drill/<run-id>/` with a random passphrase,
+  seeded `appdb` + `reportsdb`, canary every second, full + diff backups, the
+  failure scenario (fake S3 keys, archiving stopped with `pgbackrest stop`, then
+  healthy) against a stand-in listener, then all 7 restore scenarios with an
+  `EXPECT_FILE` each, and `summary.md`/`summary.json`. The restore container
+  gained `RESTORE_TYPE=immediate` (older set exactly as backed up) and
+  `RESTORE_DATA_VOLUME`. Tested end to end with a local file repository in
+  place of S3: every restore scenario and the stopped-archiving case pass
+  (RPO 6 s with `archive_timeout=10`). Not yet run against S3.
 
 **Still to do**
 - Set real `ALERT_WEBHOOK_URL` and `HEALTHCHECK_URL_*` and see a success ping and
@@ -267,12 +277,11 @@ run.
   (versioning, SSE-S3, lifecycle on `drill/` and noncurrent only), then tick
   the AWS box. The README is written; `checks.yml` is written and passes locally,
   and needs a first green run on GitHub before its box is ticked.
-- Day 2 (rest): `drill/run.sh` with a throwaway source database, seeded data and an
-  `EXPECT_FILE` per scenario; RPO measured from the canary table; the single-database
-  scenario (needs the drill's `appdb`); the failure scenario; committed sample reports
-  in `docs/reports/`.
-- Day 3: remaining extra scenarios, 10 GB benchmark, README final pass (a runbook per
-  scenario, real sample reports, benchmark table).
+- Run `drill/run.sh --scenario all` against S3 (the fake-key failure case can
+  only be shown there), then commit the reports to `docs/reports/` and tick the
+  must-have and extra scenario boxes.
+- Day 3: 10 GB benchmark (`DRILL_PGBENCH_SCALE=680`), README final pass (a
+  runbook per scenario, real sample reports, benchmark table).
 
 ## Plan (3 days)
 
