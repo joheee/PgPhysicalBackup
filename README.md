@@ -15,11 +15,11 @@ The goal of the project is **backups you can prove restore, with measured number
 | Failure alerts (non-zero exit, webhook, dead-man's switch) | Built. Tested against a stand-in listener; not yet seen with a real Slack / Healthchecks.io endpoint. |
 | Readable logs (schedule table, countdown, live view) | Built and tested. |
 | CI (`checks.yml`: shellcheck, hadolint, actionlint, compose config) | Built; every step passes locally. |
-| `restore` container: latest, point-in-time, named restore point, older set and delta restores into an empty directory with `archive_mode=off`, checks, Markdown + JSON report | Built and run against the real S3 stanza. All scenarios pass except single-database, which needs a user database (see below). |
-| `drill/run.sh`: self-contained drill on a throwaway stanza with seeded data (RPO, row-count checks, `verify`, failure alerts, all 8 scenarios) | Built. Tested end to end with a local file repository standing in for S3: all restore scenarios and the stopped-archiving failure pass. **Not yet run against S3**, so no sample reports are committed. |
-| 10 GB benchmark, committed sample reports | **Planned.** |
+| `restore` container: latest, point-in-time, named restore point, older set and delta restores into an empty directory with `archive_mode=off`, checks, Markdown + JSON report | Built and run against the real S3 stanza. The real stanza has no user database, so single-database is covered by the drill's `appdb` (see [Drill results](#drill-results-against-s3)). |
+| `drill/run.sh`: self-contained drill on a throwaway stanza with seeded data (RPO, row-count checks, `verify`, failure alerts, all 7 restore and failure scenarios) | Built and **run against S3** (run `20261109T003021Z`): every scenario passes. Results in [Drill results](#drill-results-against-s3). |
+| 10 GB benchmark | **Planned.** |
 
-So far the measured numbers come from a 22 MB test database (see [Measured so far](#measured-so-far)). RPO has not been measured against S3 yet; the drill measures it from its canary table.
+So far the measured numbers come from a 22 MB test database (see [Measured so far](#measured-so-far)). The drill's numbers (also a small database) are in [Drill results](#drill-results-against-s3).
 
 ## Architecture
 
@@ -68,7 +68,7 @@ flowchart LR
 │   ├── entrypoint.sh           # preflight → restore → start → wait → checks → report → clean up
 │   ├── checks.sh               # generic checks and the EXPECT_FILE checks
 │   └── report.sh               # JSON + Markdown report
-├── reports/                    # restore reports (git-ignored; copy keepers to docs/reports/)
+├── reports/                    # restore reports (git-ignored; keepers are summarised in this README)
 ├── backup/
 │   ├── Dockerfile
 │   ├── entrypoint.sh           # root-only job env file, schedule-only crontab, startup table
@@ -402,6 +402,39 @@ What one run does:
 
 **Secrets:** the random passphrase reaches the containers only through environment variables, never a command line or a file, and pgBackRest prints it as `<redacted>`. The failure scenario uses AWS's documented example key ID, which can never be valid.
 
+### Drill results against S3
+
+One `drill/run.sh --scenario all` run against the real bucket, `ap-southeast-2`, run id `20261109T003021Z`, on a 16-CPU / 15.7 GB laptop with 4 restore workers. PostgreSQL 17.11, pgBackRest 2.60.0, pgbench scale 1 (about 52 MB database), `archive_timeout` 10 s. **Result: PASS, 81 checks passed, none failed.** This is a small data set: it shows the scenarios work end to end, not how long a large restore takes (that is the planned 10 GB run).
+
+| Backup | Type | Database | In repository | Took |
+|---|---|---|---|---|
+| `20261109-003119F` | full | 51.8 MB | 5.1 MB | 116 s |
+| `20261109-003119F_20261109-003347D` | diff | 53.7 MB | 5.8 MB | 18 s |
+
+| Scenario | Result | Restore | WAL replay | Total | RPO |
+|---|---|---|---|---|---|
+| `latest` (crash, `docker kill`) | PASS | 101.2 s | 19.7 s | 130.2 s | 10 s |
+| `pitr` (before `DELETE FROM orders`) | PASS | 100.7 s | 13.3 s | 123.6 s | |
+| `failure` (alerts) | PASS | | | | |
+| `named-point` (before bad migration) | PASS | 103.5 s | 13.0 s | 126.4 s | |
+| `older-set` (the full backup) | PASS | 103.6 s | 4.3 s | 134.0 s | |
+| `single-db` (`--db-include=appdb`) | PASS | 80.7 s | 18.3 s | 106.2 s | 10 s |
+| `delta` (`--delta`) | PASS | 16.8 s | 18.4 s | 45.4 s | 10 s |
+
+Every restore scenario also passed these checks: recovery finished (`pg_is_in_recovery() = false`), `archive_mode = off`, data checksums on, queryable, `pg_amcheck --all` found no corruption, and the row counts matched what the source recorded. `latest` also ran `pgbackrest verify` on the repository (pass). Delta was about 6x faster than a full restore of the same backup (16.8 s against 101.2 s).
+
+| Failure check | Result | Detail |
+|---|---|---|
+| Broken S3 keys: job fails | PASS | `run-job.sh` exited 39 |
+| Broken S3 keys: webhook alert | PASS | webhook got the FAILED message |
+| Broken S3 keys: `/fail` ping | PASS | dead-man's switch got `/fail` |
+| Archiving stopped: job fails | PASS | exited 82, `WAL segment ... was not archived before the 15000ms timeout` |
+| Archiving stopped: alert and `/fail` ping | PASS | both received |
+| Healthy again: job passes | PASS | exited 0 |
+| Healthy again: success ping, no alert | PASS | ping received, no alert sent |
+
+The alert and ping targets in this run were the drill's stand-in listener, not a real Slack or Healthchecks.io endpoint.
+
 ### Disaster recovery (`restore.sh`)
 
 On a fresh or replacement host, with the same `PGBACKREST_S3_BUCKET`, `PGBACKREST_CIPHER_PASS` and `PGBACKREST_STANZA` as the source in `.env`:
@@ -416,6 +449,7 @@ It asks first, then stops `pg` and `backup`, wipes `pg-data` from a throwaway ro
 ## Best practice this kit follows
 
 - **Continuous WAL archiving** with `archive_timeout=60`: a quiet database still ships WAL, so worst-case data loss is about a minute.
+- **Schedule:** full backup every Sunday, differential every other night, `pgbackrest check` daily, `repo1-retention-full=2`.
 - **Retention owned by pgBackRest.** No S3 lifecycle rules on the live repository path.
 - **Encryption:** client-side `aes-256-cbc` plus SSE-S3.
 - **Data checksums** from `initdb`, so pgBackRest checks every page during a backup.
@@ -424,6 +458,9 @@ It asks first, then stops `pg` and `backup`, wipes `pg-data` from a throwaway ro
 - **Pinned versions:** images by tag and digest, pgBackRest by package version.
 - **Safe restores:** into an empty directory only, `initdb` never runs first, nothing is wiped without a prompt or `--yes`. The restore container restores into its own volume, with archiving off, so it cannot write into the stanza.
 - **No overlapping jobs:** pgBackRest's stanza lock stops two backups at once; the job logs it and exits non-zero.
+- **Failures are loud:** non-zero exit, output in `docker logs`, a webhook alert, and a dead-man's switch that also catches a job that silently stops running (see [Alerts](#alerts)).
+- **Readable logs:** schedule table, countdown and per-job result lines; the `backup file` noise is filtered out (see [Logs and countdown](#logs-and-countdown)).
+- **A backup counts only once it has restored.** The scenarios are run and reported, not just documented.
 
 ## Core concepts (read before debugging)
 
@@ -490,10 +527,9 @@ docker compose --env-file .env.example --profile pgadmin --profile restore --pro
 
 ## Roadmap
 
-Done: the `restore` container (see [Restore container](#restore-container)) and `drill/run.sh` (see [Restore drill](#restore-drill-drillrunsh)). Still planned, in order (see `GOALS.md` for the full definition of done):
+Done: the `restore` container (see [Restore container](#restore-container)) and `drill/run.sh`, run against S3 (see [Drill results](#drill-results-against-s3)). Still planned, in order (see `GOALS.md` for the full definition of done):
 
-1. **Run the drill against S3** and commit its reports to `docs/reports/`.
-2. **Every scenario passing against S3 with its numbers:** the must-haves (latest with RPO, point-in-time, `verify` + `pg_amcheck`, caught failures) and the extras (named restore point, older set, single database, delta). All of them are scripted in the drill; the broken-credentials failure can only be shown against S3.
-3. **Measured at ~10 GB:** backup time, compressed size, restore time and WAL replay time, with sample reports saved under `docs/reports/`.
+1. **Real alert endpoints:** set `ALERT_WEBHOOK_URL` and `HEALTHCHECK_URL_*` and see a real alert and ping arrive.
+2. **Measured at ~10 GB:** backup time, compressed size, restore time and WAL replay time, added to this README.
 
 Stretch: a weekly GitHub Actions drill against S3 over OIDC, and a monthly restore test on the client's server.

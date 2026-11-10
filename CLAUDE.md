@@ -59,8 +59,6 @@ the "backups you can prove restore, with measured numbers" story clearer.
   list, `--keep`), `seed.sql` (orders, canary, schema_migrations) and
   `listener.py` (stand-in webhook and dead-man's switch on the Compose
   network). Reports go to `reports/drill-<run-id>/`.
-- `docs/`: `benchmark.md`, `reports/` (sample reports), runbooks if the
-  README gets long.
 - `.github/workflows/`: `checks.yml` (lint and validate, no AWS). Optional
   stretch: `restore-drill.yml` (weekly and manual against S3 through OIDC).
   No MinIO.

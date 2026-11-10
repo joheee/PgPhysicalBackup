@@ -181,13 +181,13 @@ run.
 4. **Report.** Each run writes a Markdown and JSON report: backup size and
    time, restore time, WAL replay time, RPO, each check pass/fail, pgBackRest
    and Postgres versions, machine size. Exits non-zero if any check fails.
-   Sample reports saved in `docs/reports/`.
+   A summary of the S3 drill run is in the README.
 5. **Checks in CI (`checks.yml`).** `shellcheck`, `hadolint`, `actionlint`,
    and `docker compose config` on every pull request and push. No AWS access needed.
 6. **Measured restore time at 10 GB.** One recorded local run with pgbench at
    about scale 680 (≈10 GB): backup time, compressed size in S3, restore time
    and WAL replay time, with the machine and upload/download speed noted.
-   Results table in `docs/benchmark.md`.
+   Results table in the README.
 7. **Client-style README.** Architecture diagram, quick start, the best
    practice list, a runbook per scenario (exact commands), a real report and a
    short terminal log pasted in, the benchmark table, alerting setup,
@@ -236,7 +236,7 @@ run.
   only in `.env` (mode 600, git-ignored). The cipher passphrase of a real
   stanza never goes in the repo.
 
-## Progress (updated 2026-11-07)
+## Progress (updated 2026-11-10)
 
 **Built and tested**
 - Kit hardened (objective 1 except the alerting URLs): `ap-southeast-2`
@@ -268,7 +268,12 @@ run.
   gained `RESTORE_TYPE=immediate` (older set exactly as backed up) and
   `RESTORE_DATA_VOLUME`. Tested end to end with a local file repository in
   place of S3: every restore scenario and the stopped-archiving case pass
-  (RPO 6 s with `archive_timeout=10`). Not yet run against S3.
+  (RPO 6 s with `archive_timeout=10`).
+- `drill/run.sh --scenario all` run against the real S3 bucket (2026-11-09, run
+  `20261109T003021Z`): 81 checks passed, none failed; RPO 10 s, full restore
+  about 101 s, delta 16.8 s on a ~52 MB database. The alert and ping targets
+  were the drill's stand-in listener, not real Slack or Healthchecks.io. Summary
+  in the README "Drill results against S3".
 
 **Still to do**
 - Set real `ALERT_WEBHOOK_URL` and `HEALTHCHECK_URL_*` and see a success ping and
@@ -277,9 +282,6 @@ run.
   (versioning, SSE-S3, lifecycle on `drill/` and noncurrent only), then tick
   the AWS box. The README is written; `checks.yml` is written and passes locally,
   and needs a first green run on GitHub before its box is ticked.
-- Run `drill/run.sh --scenario all` against S3 (the fake-key failure case can
-  only be shown there), then commit the reports to `docs/reports/` and tick the
-  must-have and extra scenario boxes.
 - Day 3: 10 GB benchmark (`DRILL_PGBENCH_SCALE=680`), README final pass (a
   runbook per scenario, real sample reports, benchmark table).
 
@@ -289,7 +291,7 @@ run.
 |---|---|
 | 1 | Harden the kit and add alerting (objective 1). Bucket, IAM policy and user made by hand and written up in the README. `checks.yml` green. |
 | 2 | `restore` service (done) and `drill/run.sh` with the four must-have scenarios, checks and report. |
-| 3 | Extra scenarios 5–8, 10 GB benchmark and `docs/benchmark.md`. README handover with diagram, runbooks, report and cost. Upwork portfolio entry. |
+| 3 | Extra scenarios 5–8, 10 GB benchmark (in the README). README handover with diagram, runbooks, report and cost. Upwork portfolio entry. |
 
 ## Tools and software
 
@@ -304,8 +306,8 @@ PostgreSQL 17 · pgBackRest · Amazon S3 · AWS IAM · Docker + Compose · jq ·
 - [ ] The S3 bucket (encrypted, private, versioned, lifecycle only on `drill/` and old versions) and the stanza-scoped IAM policy and user exist, and the README "AWS setup" section records the exact settings.
 - [ ] `checks.yml` runs shellcheck, hadolint, actionlint, and compose config on every PR (green).
 - [x] The `restore` service restores into an empty directory with `archive_mode=off`, runs the checks and writes a Markdown/JSON report.
-- [ ] Must-have scenarios pass and are reported: latest restore with RPO, PITR before a `DELETE`, `pgbackrest verify` + `pg_amcheck`, failure alert.
-- [ ] Extra scenarios pass and are reported: named restore point, older set, single database, delta restore.
-- [ ] `docs/benchmark.md` has measured backup and restore times for a ~10 GB database.
-- [ ] No AWS keys or cipher passphrases in the repo or in GitHub.
+- [x] Must-have scenarios pass and are reported: latest restore with RPO, PITR before a `DELETE`, `pgbackrest verify` + `pg_amcheck`, failure alert.
+- [x] Extra scenarios pass and are reported: named restore point, older set, single database, delta restore.
+- [ ] The README has measured backup and restore times for a ~10 GB database.
+- [x] No AWS keys or cipher passphrases in the repo or in GitHub.
 - [ ] README has the diagram, best practice list, a runbook per scenario, a real report, benchmark, monthly cost and the AWS setup steps.

@@ -14,8 +14,8 @@ pg-socket/
 # ─── pgBackRest spool (runtime) ─────────────
 pgbackrest-spool/
 
-# ─── Restore reports (copy keepers to docs/reports/) ───
-reports/
+# ─── Restore reports (summarise keepers in the README) ───
+/reports/
 
 # ─── pgAdmin data (container-owned) ───────
 pgadmin-data/
