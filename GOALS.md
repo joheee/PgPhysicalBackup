@@ -278,10 +278,19 @@ run.
 **Still to do**
 - Set real `ALERT_WEBHOOK_URL` and `HEALTHCHECK_URL_*` and see a success ping and
   a failure alert arrive; then tick the alerting box.
-- Check that your real bucket's settings match the README "AWS setup" section
-  (versioning, SSE-S3, lifecycle on `drill/` and noncurrent only), then tick
-  the AWS box. The README is written; `checks.yml` is written and passes locally,
-  and needs a first green run on GitHub before its box is ticked.
+- AWS box: the bucket `upwork-pgbackrest` now matches the README "AWS setup"
+  section (checked 2026-11-12: public access blocked, bucket-owner-enforced,
+  SSE-S3, versioning on, tags, and the four lifecycle rules). The IAM side does
+  not yet. The only IAM user, `upwork-project`, is in group `cloud-engineer`
+  (`AdministratorAccess`, `AmazonSSMFullAccess`), and the group's inline
+  `least-privilege-pgbackrest` policy still says `YOUR-BUCKET`, so it grants
+  nothing. The key in `.env` is very likely that user's key (not confirmed), so
+  pgBackRest probably runs with admin rights. Fix: a dedicated user in no
+  group with the policy set to `upwork-pgbackrest`, a new key in `.env`, a
+  `pgbackrest check` and one drill scenario with it, then deactivate the old
+  key. Also fix the user's tag (its key is an access key ID, not
+  `project`/`environment`). Tick the AWS box after that.
+- `checks.yml` is green on GitHub (run 42854102988, 2026-11-11).
 - Day 3: 10 GB benchmark (`DRILL_PGBENCH_SCALE=680`), README final pass (a
   runbook per scenario, real sample reports, benchmark table).
 
@@ -304,7 +313,7 @@ PostgreSQL 17 · pgBackRest · Amazon S3 · AWS IAM · Docker + Compose · jq ·
 - [x] Kit hardened: `ap-southeast-2` default, data checksums, no secrets in cron files, ports on localhost, `restore.sh` asks before wiping, versions pinned.
 - [ ] Backup jobs exit non-zero on failure, log to `docker logs`, alert through a webhook, and ping a dead-man's switch on success.
 - [ ] The S3 bucket (encrypted, private, versioned, lifecycle only on `drill/` and old versions) and the stanza-scoped IAM policy and user exist, and the README "AWS setup" section records the exact settings.
-- [ ] `checks.yml` runs shellcheck, hadolint, actionlint, and compose config on every PR (green).
+- [x] `checks.yml` runs shellcheck, hadolint, actionlint, and compose config on every PR (green).
 - [x] The `restore` service restores into an empty directory with `archive_mode=off`, runs the checks and writes a Markdown/JSON report.
 - [x] Must-have scenarios pass and are reported: latest restore with RPO, PITR before a `DELETE`, `pgbackrest verify` + `pg_amcheck`, failure alert.
 - [x] Extra scenarios pass and are reported: named restore point, older set, single database, delta restore.

@@ -14,10 +14,10 @@ The goal of the project is **backups you can prove restore, with measured number
 | Hardening (region, data checksums, localhost ports, pinned versions, no secrets in cron files, confirmed wipes) | Built and tested. |
 | Failure alerts (non-zero exit, webhook, dead-man's switch) | Built. Tested against a stand-in listener; not yet seen with a real Slack / Healthchecks.io endpoint. |
 | Readable logs (schedule table, countdown, live view) | Built and tested. |
-| CI (`checks.yml`: shellcheck, hadolint, actionlint, compose config) | Built; every step passes locally. |
+| CI (`checks.yml`: shellcheck, hadolint, actionlint, compose config) | Built and green on GitHub (no AWS access needed). |
 | `restore` container: latest, point-in-time, named restore point, older set and delta restores into an empty directory with `archive_mode=off`, checks, Markdown + JSON report | Built and run against the real S3 stanza. The real stanza has no user database, so single-database is covered by the drill's `appdb` (see [Drill results](#drill-results-against-s3)). |
 | `drill/run.sh`: self-contained drill on a throwaway stanza with seeded data (RPO, row-count checks, `verify`, failure alerts, all 7 restore and failure scenarios) | Built and **run against S3** (run `20261109T003021Z`): every scenario passes. Results in [Drill results](#drill-results-against-s3). |
-| 10 GB benchmark | **Planned.** |
+| 10 GB benchmark | **Run once, by hand; results go in [Benchmark](#benchmark-10-gb) when it has passed.** Until then no 10 GB number is claimed here. |
 
 So far the measured numbers come from a 22 MB test database (see [Measured so far](#measured-so-far)). The drill's numbers (also a small database) are in [Drill results](#drill-results-against-s3).
 
@@ -205,7 +205,9 @@ Attach the same policy to an **instance profile role** and leave `PGBACKREST_AWS
 
 ### Cost
 
-S3 storage only, under about $1 a month with the default retention (2 full and 4 differential backups, WAL expired by pgBackRest). There is no always-on compute: the demo runs on your machine. Restores download from S3 and the first 100 GB a month of data out to the internet is free.
+S3 storage only, under about $1 a month for the demo databases with the default retention (2 full and 4 differential backups, WAL expired by pgBackRest). There is no always-on compute: the demo runs on your machine. Restores download from S3 and the first 100 GB a month of data out to the internet is free.
+
+For your own database, monthly cost is roughly the repository size (see `pgbackrest info`) times the S3 Standard price per GB-month in `ap-southeast-2`, plus request charges. With versioning on, files that pgBackRest deletes stay as noncurrent versions for 7 days before they expire, so expect the bill to run a little above the live repository size. Drill objects under `drill/` expire after 7 days. The 10 GB benchmark is a one-off.
 
 ## Configuration (`.env`)
 
@@ -435,6 +437,28 @@ Every restore scenario also passed these checks: recovery finished (`pg_is_in_re
 
 The alert and ping targets in this run were the drill's stand-in listener, not a real Slack or Healthchecks.io endpoint.
 
+### Benchmark (10 GB)
+
+One recorded run of the same drill with a ~10 GB database, to show how restore time scales beyond the 50 MB runs above. It is run once, by hand, against the real bucket (objects under `drill/<run-id>/` expire after 7 days).
+
+```bash
+DRILL_PGBENCH_SCALE=680 drill/run.sh --scenario latest,delta
+```
+
+Scale 680 gives about 10 GB; `latest` gives the full restore and WAL replay time and RPO, and `delta` gives the repair time to compare against. Everything in the table comes from `reports/drill-<run-id>/summary.md` and `info.json`.
+
+| | Value |
+|---|---|
+| Run id / date | _not recorded yet_ |
+| Database size / compressed size in S3 | _not recorded yet_ |
+| Full backup time | _not recorded yet_ |
+| Restore time (`latest`, 4 workers) / WAL replay | _not recorded yet_ |
+| Delta restore time | _not recorded yet_ |
+| RPO | _not recorded yet_ |
+| Machine and network | 16 CPUs / 15.7 GB laptop; upload and download speed _not recorded yet_ |
+
+Fill this table only from a run whose summary says PASS.
+
 ### Disaster recovery (`restore.sh`)
 
 On a fresh or replacement host, with the same `PGBACKREST_S3_BUCKET`, `PGBACKREST_CIPHER_PASS` and `PGBACKREST_STANZA` as the source in `.env`:
@@ -445,6 +469,35 @@ On a fresh or replacement host, with the same `PGBACKREST_S3_BUCKET`, `PGBACKRES
 ```
 
 It asks first, then stops `pg` and `backup`, wipes `pg-data` from a throwaway root container, restores the latest backup into the empty directory, and starts `pg`, which replays WAL and comes up as the primary. The restore keeps the database's system identifier, so archiving to the same stanza keeps working. Confirm with `SELECT pg_is_in_recovery();` (expect `f`).
+
+## Runbooks
+
+One entry per recovery case. Every restore below goes into the **restore container's own volume** (`pgdemo_restore-data`), never into `pg-data`, and runs with `archive_mode=off`, so it is safe to try while the real database is running. Each run writes `reports/<run-id>-<scenario>.md` and `.json` and exits non-zero if a check fails. Commands use the real stanza; the drill runs the same scenarios on a throwaway one (see [Restore drill](#restore-drill-drillrunsh)).
+
+Two things only `restore.sh` does: it wipes and rebuilds `pg-data`, and it restores the **latest** backup only. Getting a *different* point back onto the production host is not scripted. The usual route is to recover into the restore container with `RESTORE_KEEP=1`, copy out the rows or tables you need, and load them into production. Restoring a target time straight into an empty `pg-data` with `pgbackrest restore --type=time` by hand uses the same options, but this repo has not tested that on `pg-data`.
+
+| # | Situation | Command | Expected result |
+|---|---|---|---|
+| 1 | **Server lost** (crash, dead disk) | Prove it: `docker compose run --rm restore`. Rebuild this host: `./restore.sh` | Recovery finished, `archive_mode=off`, `pg_amcheck` clean. RPO is the age of the newest archived WAL, at most about `archive_timeout`. |
+| 2 | **Human mistake** (`DELETE FROM orders` at time T) | `RESTORE_TYPE=time RESTORE_TARGET="YYYY-MM-DD HH:MM:SS+00" docker compose run --rm restore` | Postgres stops before the first commit after T, so the deleted rows are back. The target needs a commit after T in the archived WAL, or Postgres refuses to finish: run `SELECT txid_current();`, `SELECT pg_switch_wal();` and `pgbackrest check` first. |
+| 3 | **Are the backups silently corrupt?** | `RESTORE_VERIFY=1 docker compose run --rm restore` | `pgbackrest verify` passes on the whole repository (downloads all of it) and `pg_amcheck --all` finds nothing on the restored copy. |
+| 4 | **Is a failing backup noticed?** | Break the credentials, then `docker exec pg-cron-backup /usr/local/bin/run-job.sh check check` | Non-zero exit, `FAILED` in `docker logs`, webhook alert, `/fail` ping. See [Alerts](#alerts). The drill runs this against a stand-in listener: `drill/run.sh --scenario failure`. |
+| 5 | **Before a risky migration** | `SELECT pg_create_restore_point('pre_migration');` then later `RESTORE_TYPE=name RESTORE_TARGET=pre_migration docker compose run --rm restore` | The data as it was at the restore point. |
+| 6 | **Corruption noticed days later** | `docker exec -u postgres pg pgbackrest --stanza=pg info`, then `RESTORE_SET=<label> docker compose run --rm restore` | That older backup. Add `RESTORE_TYPE=immediate` to get it exactly as backed up, without replaying later WAL. |
+| 7 | **One database is damaged** | `RESTORE_DB_INCLUDE=<database> docker compose run --rm restore` | That user database is restored; the other user databases come back as empty placeholders and must be dropped. System databases are always restored. |
+| 8 | **Fast repair of a damaged copy** | `RESTORE_KEEP=1 docker compose run --rm restore`, then `RESTORE_DELTA=1 docker compose run --rm restore` | Only changed files are fetched. About 6 to 8x faster than a full restore on the small test databases (see the measured tables). |
+
+After a run with `RESTORE_KEEP=1`, clear the volume with `docker volume rm pgdemo_restore-data` before the next full restore, or the container exits with code 2 and changes nothing.
+
+## Use this on your own database
+
+The kit is the same on a laptop, a VPS or an EC2 instance.
+
+1. **AWS side:** one bucket and one stanza prefix per host ([AWS setup](#aws-setup)). On EC2, attach the policy to an instance profile and set no keys. On a VPS, use a dedicated IAM user scoped to that bucket and prefix (never an admin user), with its key only in the mode-600 `.env`.
+2. **Configuration:** set `PGBACKREST_STANZA`, `PGBACKREST_S3_BUCKET` and a fresh `PGBACKREST_CIPHER_PASS` (`openssl rand -base64 48`; store it somewhere other than the server, since without it the backups cannot be read), then `./start.sh`. Set `ALERT_WEBHOOK_URL` and the `HEALTHCHECK_URL_*` values so a failure or a silent stop reaches a person.
+3. **Your data:** the kit runs its own PostgreSQL 17 in Compose. To bring existing data in, load it into that instance (for a small database `pg_dump` and `pg_restore` is enough; physical backups are for the case where you need point-in-time recovery or the database is large). Backing up a Postgres you already run on the host needs pgBackRest installed there with `archive_command = pgbackrest ... archive-push`; the config templates in `configs/` show the settings, but that route has not been tested in this repo.
+4. **Prove it:** run `docker compose run --rm restore` and read the report. Run the scenarios from [Runbooks](#runbooks) that matter to you, and time a restore of *your* data volume: the 22 MB and 52 MB runs above are dominated by per-file S3 latency, and a large database behaves differently (see the [benchmark](#benchmark-10-gb)).
+5. **Repeat it:** a monthly restore test, run by hand or from cron, is what keeps the claim true.
 
 ## Best practice this kit follows
 
@@ -530,6 +583,8 @@ docker compose --env-file .env.example --profile pgadmin --profile restore --pro
 Done: the `restore` container (see [Restore container](#restore-container)) and `drill/run.sh`, run against S3 (see [Drill results](#drill-results-against-s3)). Still planned, in order (see `GOALS.md` for the full definition of done):
 
 1. **Real alert endpoints:** set `ALERT_WEBHOOK_URL` and `HEALTHCHECK_URL_*` and see a real alert and ping arrive.
-2. **Measured at ~10 GB:** backup time, compressed size, restore time and WAL replay time, added to this README.
+2. **Scoped IAM user:** run the kit with a user that has only the policy from [AWS setup](#aws-setup), instead of a broader account user.
+3. **Measured at ~10 GB:** fill the [Benchmark](#benchmark-10-gb) table from a passing run.
+4. **A short terminal log of a drill run** pasted into this README.
 
 Stretch: a weekly GitHub Actions drill against S3 over OIDC, and a monthly restore test on the client's server.
