@@ -278,21 +278,30 @@ run.
 **Still to do**
 - Set real `ALERT_WEBHOOK_URL` and `HEALTHCHECK_URL_*` and see a success ping and
   a failure alert arrive; then tick the alerting box.
-- AWS box: the bucket `upwork-pgbackrest` now matches the README "AWS setup"
-  section (checked 2026-11-12: public access blocked, bucket-owner-enforced,
-  SSE-S3, versioning on, tags, and the four lifecycle rules). The IAM side does
-  not yet. The only IAM user, `upwork-project`, is in group `cloud-engineer`
-  (`AdministratorAccess`, `AmazonSSMFullAccess`), and the group's inline
-  `least-privilege-pgbackrest` policy still says `YOUR-BUCKET`, so it grants
-  nothing. The key in `.env` is very likely that user's key (not confirmed), so
-  pgBackRest probably runs with admin rights. Fix: a dedicated user in no
-  group with the policy set to `upwork-pgbackrest`, a new key in `.env`, a
-  `pgbackrest check` and one drill scenario with it, then deactivate the old
-  key. Also fix the user's tag (its key is an access key ID, not
-  `project`/`environment`). Tick the AWS box after that.
+- AWS box: done (2026-11-12). Bucket `upwork-pgbackrest` matches the README "AWS
+  setup" section (public access blocked, bucket-owner-enforced, SSE-S3,
+  versioning on, tags, the four lifecycle rules). The kit now runs as
+  `upwork-pgbackrest-demo`, in no group, with only the managed policy
+  `least-priviledge-pgbackrest-bucket` (real bucket, `pgbackrest/` and `drill/`
+  prefixes, no `DeleteObjectVersion`; user and policy tagged `project` and
+  `environment`). Checked with the IAM simulator and live read-only calls
+  (allowed on both prefixes, `AccessDenied` on the bucket root and its
+  settings), and `pgbackrest check` passes from `pg` and `pg-cron-backup` with
+  that key. The old admin-group key on `upwork-project` is deactivated, not
+  deleted. The 10 GB drill ran with the new key (below). Optional: remove the
+  dead inline policy
+  `least-privilege-pgbackrest` (still says `YOUR-BUCKET`) from group
+  `cloud-engineer`.
 - `checks.yml` is green on GitHub (run 42854102988, 2026-11-11).
-- Day 3: 10 GB benchmark (`DRILL_PGBENCH_SCALE=680`), README final pass (a
-  runbook per scenario, real sample reports, benchmark table).
+- 10 GB benchmark: done (2026-11-11, run `20261111T200536Z`, `latest` and
+  `delta`, PASS): 10,205 MB database, 464 MB in the repository, full backup
+  290 s, full restore 195.4 s + 7.7 s WAL replay, delta 84.6 s, RPO 10 s. It
+  first failed twice with `[082]` because pgbench seeded about 8 GB of WAL
+  faster than `archive_command` shipped it; `drill/run.sh` now waits for the
+  archive to catch up (`DRILL_ARCHIVE_DRAIN_TIMEOUT`). README final pass done.
+- Still open: record upload and download speed for the benchmark, paste a
+  short drill terminal log in the README, set the real alert and healthcheck
+  URLs (alerting box), the Upwork portfolio entry, and commit.
 
 ## Plan (3 days)
 
@@ -312,11 +321,11 @@ PostgreSQL 17 · pgBackRest · Amazon S3 · AWS IAM · Docker + Compose · jq ·
 
 - [x] Kit hardened: `ap-southeast-2` default, data checksums, no secrets in cron files, ports on localhost, `restore.sh` asks before wiping, versions pinned.
 - [ ] Backup jobs exit non-zero on failure, log to `docker logs`, alert through a webhook, and ping a dead-man's switch on success.
-- [ ] The S3 bucket (encrypted, private, versioned, lifecycle only on `drill/` and old versions) and the stanza-scoped IAM policy and user exist, and the README "AWS setup" section records the exact settings.
+- [x] The S3 bucket (encrypted, private, versioned, lifecycle only on `drill/` and old versions) and the stanza-scoped IAM policy and user exist, and the README "AWS setup" section records the exact settings.
 - [x] `checks.yml` runs shellcheck, hadolint, actionlint, and compose config on every PR (green).
 - [x] The `restore` service restores into an empty directory with `archive_mode=off`, runs the checks and writes a Markdown/JSON report.
 - [x] Must-have scenarios pass and are reported: latest restore with RPO, PITR before a `DELETE`, `pgbackrest verify` + `pg_amcheck`, failure alert.
 - [x] Extra scenarios pass and are reported: named restore point, older set, single database, delta restore.
-- [ ] The README has measured backup and restore times for a ~10 GB database.
+- [x] The README has measured backup and restore times for a ~10 GB database.
 - [x] No AWS keys or cipher passphrases in the repo or in GitHub.
-- [ ] README has the diagram, best practice list, a runbook per scenario, a real report, benchmark, monthly cost and the AWS setup steps.
+- [x] README has the diagram, best practice list, a runbook per scenario, a real report, benchmark, monthly cost and the AWS setup steps.

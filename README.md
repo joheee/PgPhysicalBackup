@@ -17,9 +17,9 @@ The goal of the project is **backups you can prove restore, with measured number
 | CI (`checks.yml`: shellcheck, hadolint, actionlint, compose config) | Built and green on GitHub (no AWS access needed). |
 | `restore` container: latest, point-in-time, named restore point, older set and delta restores into an empty directory with `archive_mode=off`, checks, Markdown + JSON report | Built and run against the real S3 stanza. The real stanza has no user database, so single-database is covered by the drill's `appdb` (see [Drill results](#drill-results-against-s3)). |
 | `drill/run.sh`: self-contained drill on a throwaway stanza with seeded data (RPO, row-count checks, `verify`, failure alerts, all 7 restore and failure scenarios) | Built and **run against S3** (run `20261109T003021Z`): every scenario passes. Results in [Drill results](#drill-results-against-s3). |
-| 10 GB benchmark | **Run once, by hand; results go in [Benchmark](#benchmark-10-gb) when it has passed.** Until then no 10 GB number is claimed here. |
+| 10 GB benchmark | **Done and passing** (run `20261111T200536Z`: full restore 195 s, delta 85 s, RPO 10 s). Results in [Benchmark](#benchmark-10-gb). Only `latest` and `delta` ran at this size. |
 
-So far the measured numbers come from a 22 MB test database (see [Measured so far](#measured-so-far)). The drill's numbers (also a small database) are in [Drill results](#drill-results-against-s3).
+Smaller measured runs: a 22 MB test database ([Measured so far](#measured-so-far)) and the all-scenario drill on a 52 MB database ([Drill results](#drill-results-against-s3)).
 
 ## Architecture
 
@@ -347,7 +347,7 @@ Each run saves `reports/<run-id>-<scenario>.json` and `.md`, for example:
 
 #### Measured so far
 
-From the real stanza, on one laptop against S3 in `ap-southeast-2`, restoring a **22.1 MB database (966 files)**. This is a tiny test database, not a benchmark; the 10 GB run is still planned.
+From the real stanza, on one laptop against S3 in `ap-southeast-2`, restoring a **22.1 MB database (966 files)**. This is a tiny test database, not a benchmark; the 10 GB run is in [Benchmark](#benchmark-10-gb).
 
 | Run | Restore time | WAL replay |
 |---|---|---|
@@ -399,6 +399,7 @@ What one run does:
 | `DRILL_PGBENCH_SECONDS` | `15` | pgbench run between the full and the differential backup |
 | `DRILL_ARCHIVE_TIMEOUT` | `10` | `archive_timeout` of the drill source, which bounds the RPO |
 | `DRILL_RPO_MAX_SECONDS` | `2 x archive_timeout + 10` | RPO limit for the `latest`, `single-db` and `delta` checks |
+| `DRILL_ARCHIVE_DRAIN_TIMEOUT` | `3600` | Seconds to wait after seeding for the WAL archive to catch up. A large seed (about 8 GB of WAL at scale 680) is written in under a minute but archived one segment at a time; without the wait, `pgbackrest check` times out with `[082]`. |
 
 **Cleanup:** at the end (pass or fail) the drill removes its own containers and volumes (`drill-source`, `drill-listener`, `pgdemo_drill-source-data`, `pgdemo_drill-socket`, `pgdemo_drill-restore-data`), never anything else. If those volumes already exist when it starts (a `--keep` run or a crash), it refuses and prints the commands to remove them. The drill's objects stay in S3 under `drill/<run-id>/` and expire through the bucket's `drill/` lifecycle rule; nothing deletes them by hand.
 
@@ -406,7 +407,7 @@ What one run does:
 
 ### Drill results against S3
 
-One `drill/run.sh --scenario all` run against the real bucket, `ap-southeast-2`, run id `20261109T003021Z`, on a 16-CPU / 15.7 GB laptop with 4 restore workers. PostgreSQL 17.11, pgBackRest 2.60.0, pgbench scale 1 (about 52 MB database), `archive_timeout` 10 s. **Result: PASS, 81 checks passed, none failed.** This is a small data set: it shows the scenarios work end to end, not how long a large restore takes (that is the planned 10 GB run).
+One `drill/run.sh --scenario all` run against the real bucket, `ap-southeast-2`, run id `20261109T003021Z`, on a 16-CPU / 15.7 GB laptop with 4 restore workers. PostgreSQL 17.11, pgBackRest 2.60.0, pgbench scale 1 (about 52 MB database), `archive_timeout` 10 s. **Result: PASS, 81 checks passed, none failed.** This is a small data set: it shows the scenarios work end to end, not how long a large restore takes (that is the [10 GB benchmark](#benchmark-10-gb)).
 
 | Backup | Type | Database | In repository | Took |
 |---|---|---|---|---|
@@ -447,17 +448,28 @@ DRILL_PGBENCH_SCALE=680 drill/run.sh --scenario latest,delta
 
 Scale 680 gives about 10 GB; `latest` gives the full restore and WAL replay time and RPO, and `delta` gives the repair time to compare against. Everything in the table comes from `reports/drill-<run-id>/summary.md` and `info.json`.
 
+Run `20261111T200536Z` (2026-11-11), real bucket in `ap-southeast-2`, 16-CPU / 15.7 GB laptop, 4 workers, PostgreSQL 17.11, pgBackRest 2.60.0, pgbench scale 680, `archive_timeout` 10 s. **Result: PASS.** All 14 `latest` checks passed (including `pgbackrest verify` on the repository and `pg_amcheck --all`), and the delta run passed too.
+
 | | Value |
 |---|---|
-| Run id / date | _not recorded yet_ |
-| Database size / compressed size in S3 | _not recorded yet_ |
-| Full backup time | _not recorded yet_ |
-| Restore time (`latest`, 4 workers) / WAL replay | _not recorded yet_ |
-| Delta restore time | _not recorded yet_ |
-| RPO | _not recorded yet_ |
-| Machine and network | 16 CPUs / 15.7 GB laptop; upload and download speed _not recorded yet_ |
+| Database size | 10,205 MB (68,000,000 `pgbench_accounts` rows) |
+| Full backup | 290 s, 464 MB in the repository |
+| Differential backup | 250 s, 470 MB in the repository |
+| Restore, `latest` (4 workers) | 195.4 s, plus 7.7 s WAL replay, 247.2 s in total |
+| Restore, `delta` (4 workers) | 84.6 s, plus 8.0 s WAL replay, 137.0 s in total |
+| RPO | 10 s |
+| S3 under `drill/<run-id>/` | 1.06 GB: 0.98 GB of backups, 0.08 GB of WAL |
+| Network | upload and download speed were not recorded for this run |
 
-Fill this table only from a run whose summary says PASS.
+How to read these numbers:
+
+- **The data compresses about 22 to 1** (10.2 GB became 0.46 GB), because pgbench data is very regular. The restore therefore downloaded under 0.5 GB, and the 195 s is mostly writing and decompressing 10 GB, not network time. A real database compresses less, so a real restore of the same size would be more network-bound and slower. Treat these as a measured example for this workload, not a promise for yours.
+- **Delta was 2.3x faster** than the full restore here, against 6 to 8x on the 22 to 52 MB runs. A delta restore has to checksum every file already on disk, and that costs more at 10 GB.
+- **The differential backup was nearly as large as the full one.** pgbench updates touch every 1 GB table segment and pgBackRest copies whole changed files.
+- **Only `latest` and `delta` ran at this size.** The other scenarios were proven at 52 MB (see [Drill results](#drill-results-against-s3)).
+- **Archiving can lag a bulk load.** Seeding wrote about 8 GB of WAL in under a minute, but `archive_command` pushes one segment at a time. `drill/run.sh` now waits for the archive to catch up before `check` and before each backup (`DRILL_ARCHIVE_DRAIN_TIMEOUT`); without that wait the first attempts failed with `[082]`. A client with a heavy write load would want asynchronous archiving (`archive-async`), which needs `archive-push-queue-max` raised first because pgBackRest discards WAL past that limit. This kit has not tested that.
+
+The drill's objects expire through the bucket's `drill/` lifecycle rule (7 days, plus 7 more days as noncurrent versions).
 
 ### Disaster recovery (`restore.sh`)
 
@@ -485,7 +497,7 @@ Two things only `restore.sh` does: it wipes and rebuilds `pg-data`, and it resto
 | 5 | **Before a risky migration** | `SELECT pg_create_restore_point('pre_migration');` then later `RESTORE_TYPE=name RESTORE_TARGET=pre_migration docker compose run --rm restore` | The data as it was at the restore point. |
 | 6 | **Corruption noticed days later** | `docker exec -u postgres pg pgbackrest --stanza=pg info`, then `RESTORE_SET=<label> docker compose run --rm restore` | That older backup. Add `RESTORE_TYPE=immediate` to get it exactly as backed up, without replaying later WAL. |
 | 7 | **One database is damaged** | `RESTORE_DB_INCLUDE=<database> docker compose run --rm restore` | That user database is restored; the other user databases come back as empty placeholders and must be dropped. System databases are always restored. |
-| 8 | **Fast repair of a damaged copy** | `RESTORE_KEEP=1 docker compose run --rm restore`, then `RESTORE_DELTA=1 docker compose run --rm restore` | Only changed files are fetched. About 6 to 8x faster than a full restore on the small test databases (see the measured tables). |
+| 8 | **Fast repair of a damaged copy** | `RESTORE_KEEP=1 docker compose run --rm restore`, then `RESTORE_DELTA=1 docker compose run --rm restore` | Only changed files are fetched. About 6 to 8x faster than a full restore on the small test databases, 2.3x at 10 GB (see [Benchmark](#benchmark-10-gb)). |
 
 After a run with `RESTORE_KEEP=1`, clear the volume with `docker volume rm pgdemo_restore-data` before the next full restore, or the container exits with code 2 and changes nothing.
 
@@ -580,11 +592,9 @@ docker compose --env-file .env.example --profile pgadmin --profile restore --pro
 
 ## Roadmap
 
-Done: the `restore` container (see [Restore container](#restore-container)) and `drill/run.sh`, run against S3 (see [Drill results](#drill-results-against-s3)). Still planned, in order (see `GOALS.md` for the full definition of done):
+Done: the `restore` container (see [Restore container](#restore-container)), `drill/run.sh` run against S3 (see [Drill results](#drill-results-against-s3)), the scoped IAM user, and the [10 GB benchmark](#benchmark-10-gb). Still planned, in order (see `GOALS.md` for the full definition of done):
 
 1. **Real alert endpoints:** set `ALERT_WEBHOOK_URL` and `HEALTHCHECK_URL_*` and see a real alert and ping arrive.
-2. **Scoped IAM user:** run the kit with a user that has only the policy from [AWS setup](#aws-setup), instead of a broader account user.
-3. **Measured at ~10 GB:** fill the [Benchmark](#benchmark-10-gb) table from a passing run.
-4. **A short terminal log of a drill run** pasted into this README.
+2. **Benchmark extras:** record the upload and download speed for the [10 GB run](#benchmark-10-gb), and paste a short terminal log of a drill run here.
 
 Stretch: a weekly GitHub Actions drill against S3 over OIDC, and a monthly restore test on the client's server.

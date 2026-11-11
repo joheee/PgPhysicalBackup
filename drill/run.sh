@@ -29,6 +29,7 @@ SCALE="${DRILL_PGBENCH_SCALE:-1}"
 PGBENCH_SECONDS="${DRILL_PGBENCH_SECONDS:-15}"
 export DRILL_ARCHIVE_TIMEOUT="${DRILL_ARCHIVE_TIMEOUT:-10}"
 RPO_MAX="${DRILL_RPO_MAX_SECONDS:-$((DRILL_ARCHIVE_TIMEOUT * 2 + 10))}"
+DRILL_ARCHIVE_DRAIN_TIMEOUT="${DRILL_ARCHIVE_DRAIN_TIMEOUT:-3600}"
 FAKE_KEY_ID=AKIAIOSFODNN7EXAMPLE # AWS's documented example key: always rejected
 
 usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
@@ -73,6 +74,7 @@ docker compose version >/dev/null 2>&1 || die "docker compose (v2) is not availa
 [[ "$PGBENCH_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "DRILL_PGBENCH_SECONDS must be a whole number"
 [[ "$DRILL_ARCHIVE_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || die "DRILL_ARCHIVE_TIMEOUT must be a whole number of seconds"
 [[ "$RPO_MAX" =~ ^[0-9]+$ ]] || die "DRILL_RPO_MAX_SECONDS must be a whole number of seconds"
+[[ "$DRILL_ARCHIVE_DRAIN_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || die "DRILL_ARCHIVE_DRAIN_TIMEOUT must be a whole number of seconds"
 
 # Leftovers from a crashed or --keep run would be restored into or reused, so
 # refuse instead of wiping them.
@@ -149,6 +151,36 @@ DB=postgres sql -c 'CREATE DATABASE appdb' -c 'CREATE DATABASE reportsdb'
 DB=reportsdb sql -c 'CREATE TABLE monthly_totals AS SELECT g AS month, g * 1000 AS total FROM generate_series(1, 12) AS g'
 sql <drill/seed.sql
 dc exec -T -u postgres drill-source pgbench -i -q -s "$SCALE" appdb >"$OUT/pgbench-init.log" 2>&1
+# A large pgbench -i writes gigabytes of WAL in under a minute (about 8 GB at scale 680), but
+# archive_command pushes one segment at a time. Without this wait, `check` (60 s archive
+# timeout) queues behind the backlog and fails with [082]. Wait for the archive to catch up.
+segment_no() { echo $(((16#${1:8:8}) * 256 + 16#${1:16:8})); } # 16 MB segments: 256 per log file
+wait_archive_drained() {
+    local target archived failed failed0 start=$SECONDS next_report=0
+    DB=postgres sql -c 'SELECT pg_switch_wal()' >/dev/null
+    target="$(DB=postgres sql -c 'SELECT pg_walfile_name(pg_current_wal_lsn() - 1)')"
+    failed0="$(DB=postgres sql -c 'SELECT failed_count FROM pg_stat_archiver')"
+    while :; do
+        IFS='|' read -r archived failed < <(DB=postgres sql -c "SELECT coalesce(last_archived_wal, '-'), failed_count FROM pg_stat_archiver")
+        if [[ "$archived" == "$target" || "$archived" > "$target" ]]; then
+            log "WAL archive caught up to $target after $((SECONDS - start))s"
+            return 0
+        fi
+        [ $((failed - failed0)) -lt 5 ] || die "archiving is failing ($((failed - failed0)) failures since the seed), see the drill-source log"
+        [ $((SECONDS - start)) -lt "$DRILL_ARCHIVE_DRAIN_TIMEOUT" ] ||
+            die "WAL archive did not catch up within ${DRILL_ARCHIVE_DRAIN_TIMEOUT}s (last archived: $archived, target: $target)"
+        if [ "$SECONDS" -ge "$next_report" ]; then
+            if [ "$archived" = - ]; then
+                log "waiting for the WAL archive: nothing archived yet, target $target"
+            else
+                log "waiting for the WAL archive: $(($(segment_no "$target") - $(segment_no "$archived"))) segments behind (at $archived)"
+            fi
+            next_report=$((SECONDS + 30))
+        fi
+        sleep 5
+    done
+}
+wait_archive_drained
 # The canary: one committed row a second until the source dies.
 dc exec -d -u postgres drill-source psql -X -d appdb -c \
     'DO $$ BEGIN LOOP INSERT INTO canary DEFAULT VALUES; COMMIT; PERFORM pg_sleep(1); END LOOP; END $$'
@@ -167,6 +199,7 @@ full_s="$(backup full)"
 log "full backup took ${full_s}s"
 dc exec -T -u postgres drill-source pgbench -n -c 2 -T "$PGBENCH_SECONDS" appdb >"$OUT/pgbench-run.log" 2>&1
 sql -c "INSERT INTO orders (customer, amount) SELECT 'customer-' || g, 9.99 FROM generate_series(1001, 1500) AS g"
+wait_archive_drained # the pgbench run above writes WAL faster than it is archived; a backup waits only 60 s for its last segment
 diff_s="$(backup diff)"
 log "pgbench ran ${PGBENCH_SECONDS}s, 500 more orders; differential backup took ${diff_s}s"
 br --output=json info >"$OUT/info.json"
